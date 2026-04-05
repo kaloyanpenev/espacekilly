@@ -1,0 +1,315 @@
+name: Build, Test, and Quality Checks
+
+on:
+  push:
+    branches: [main, develop]
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.compiler }} / ${{ matrix.build_type }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        compiler: [llvm, gcc]
+        build_type: [Debug, Release]
+        
+        exclude:
+          # No GCC on Windows (MinGW is problematic)
+          - os: windows-latest
+            compiler: gcc
+
+        include:
+          # MSVC builds
+          - os: windows-latest
+            compiler: msvc
+            build_type: Debug
+          - os: windows-latest
+            compiler: msvc
+            build_type: Release
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Cpp
+        uses: aminya/setup-cpp@v1
+        with:
+          compiler: ${{ matrix.compiler }}
+          vcvarsall: ${{ contains(matrix.os, 'windows') }}
+          cmake: true
+          ninja: true
+          ccache: true
+
+      - name: Cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.ccache
+            ~/Library/Caches/ccache
+          key: ${{ runner.os }}-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.compiler }}-${{ matrix.build_type }}
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DENABLE_CLANG_TIDY=OFF
+          -DENABLE_CPPCHECK=OFF
+          -DENABLE_UBSAN=OFF
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
+
+  build-asan-ubsan:
+    name: Address Sanitizer + Undefined Behaviour Sanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Cpp
+        uses: aminya/setup-cpp@v1
+        with:
+          compiler: llvm
+          cmake: true
+          ninja: true
+          ccache: true
+
+      - name: Cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.ccache
+          key: ${{ runner.os }}-llvm-asan-ubsan-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: ${{ runner.os }}-llvm-asan-ubsan
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DENABLE_ASAN=ON
+          -DENABLE_UBSAN=ON
+          -DENABLE_CLANG_TIDY=OFF
+          -DENABLE_CPPCHECK=OFF
+          -DBUILD_TESTING=OFF
+
+      - name: Build
+        run: cmake --build build
+
+  build-tsan:
+    name: Thread Sanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Cpp
+        uses: aminya/setup-cpp@v1
+        with:
+          compiler: llvm
+          cmake: true
+          ninja: true
+          ccache: true
+
+      - name: Cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.ccache
+          key: ${{ runner.os }}-llvm-tsan-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: ${{ runner.os }}-llvm-tsan
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DENABLE_TSAN=ON
+          -DENABLE_UBSAN=OFF
+          -DENABLE_CLANG_TIDY=OFF
+          -DENABLE_CPPCHECK=OFF
+          -DBUILD_TESTING=OFF
+
+      - name: Build
+        run: cmake --build build
+
+  build-lsan:
+    name: Leak Sanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Cpp
+        uses: aminya/setup-cpp@v1
+        with:
+          compiler: llvm
+          cmake: true
+          ninja: true
+          ccache: true
+
+      - name: Cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.ccache
+          key: ${{ runner.os }}-llvm-ubsan-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: ${{ runner.os }}-llvm-ubsan
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DENABLE_UBSAN=OFF
+          -DENABLE_LSAN=ON
+          -DENABLE_CLANG_TIDY=OFF
+          -DENABLE_CPPCHECK=OFF
+          -DBUILD_TESTING=OFF
+
+      - name: Build
+        run: cmake --build build
+
+  build-msan:
+    name: Memory Sanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Cpp
+        uses: aminya/setup-cpp@v1
+        with:
+          compiler: llvm
+          cmake: true
+          ninja: true
+          ccache: true
+
+      - name: Cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.ccache
+          key: ${{ runner.os }}-llvm-msan-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: ${{ runner.os }}-llvm-msan
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DENABLE_MSAN=ON
+          -DENABLE_UBSAN=OFF
+          -DENABLE_CLANG_TIDY=OFF
+          -DENABLE_CPPCHECK=OFF
+          -DBUILD_TESTING=OFF
+
+      - name: Build
+        run: cmake --build build
+
+  build-emscripten:
+    name: Emscripten / WebAssembly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 'latest'
+          actions-cache: true
+
+      - name: Cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.ccache
+          key: ${{ runner.os }}-emscripten-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: ${{ runner.os }}-emscripten
+
+      - name: Configure
+        run: >
+          emcmake cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DENABLE_CLANG_TIDY=OFF
+          -DENABLE_CPPCHECK=OFF
+          -DENABLE_UBSAN=OFF
+          -DBUILD_TESTING=OFF
+
+      - name: Build
+        run: emmake cmake --build build
+
+  clang-format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check formatting
+        run: |
+          chmod +x ./run-clang-format.sh
+          ./run-clang-format.sh --dry-run --Werror
+
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      
+      - name: Setup Cpp
+        uses: aminya/setup-cpp@v1
+        with:
+          compiler: llvm
+          cmake: true
+          ninja: true
+          clangtidy: true
+          cppcheck: true
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DENABLE_CLANG_TIDY=ON
+          -DENABLE_CPPCHECK=ON
+          -DWARNINGS_AS_ERRORS=ON
+          -DENABLE_UBSAN=OFF
+
+      - name: Build
+        run: cmake --build build
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y && sudo apt-get update && sudo apt-get install -y cmake ninja-build g++-14 gcovr
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="--coverage"
+          -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+          -DENABLE_UBSAN=OFF
+          -DBUILD_TESTING=ON
+        env:
+          CC: gcc-14
+          CXX: g++-14
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
+
+      - name: Generate coverage report
+        run: gcovr --root . --gcov-executable gcov-14 --exclude build/ --xml-pretty --output build/coverage.xml
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: build/coverage.xml
