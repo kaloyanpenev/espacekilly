@@ -14,6 +14,7 @@ set(ENABLE_CLANG_TIDY_DEFAULT ON)
 set(ENABLE_CPPCHECK_DEFAULT OFF)
 set(ENABLE_IWYU_DEFAULT OFF)
 set(BUILD_TESTING_DEFAULT OFF)
+set(ENABLE_XRAY_DEFAULT OFF)
 
 if(EMSCRIPTEN)
   # Emscripten: disable all analysis tools
@@ -60,4 +61,5 @@ option(ENABLE_IWYU "Enable include-what-you-use" ${ENABLE_IWYU_DEFAULT})
 option(ENABLE_COMPILER_CACHE "Enable compiler cache (ccache/sccache)" ON)
 option(WASM_SINGLE_FILE "Embed WASM in JS (Emscripten only)" OFF)
 option(BUILD_TESTING "Build the testing tree" ${BUILD_TESTING_DEFAULT})
+option(ENABLE_XRAY "Enable Clang XRay instrumentation for profiling" ${ENABLE_XRAY_DEFAULT})
 

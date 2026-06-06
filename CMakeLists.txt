@@ -51,6 +51,8 @@ include(cmake/Sanitizers.cmake)
 include(cmake/StaticAnalyzers.cmake)
 # Configure interprocedural optimization (LTO)
 include(cmake/InterproceduralOptimization.cmake)
+# Configure Clang XRay instrumentation for profiling
+include(cmake/XRay.cmake)
 
 # Try to enable compiler cache early in configuration
 project_enable_cache()

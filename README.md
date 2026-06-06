@@ -54,6 +54,32 @@ cd web/
 ```
 The Vite config injects `project.json` values and points the UI at the generated `<name>.js` module.
 
+## Profiling with Clang XRay
+
+XRay is a Clang instrumentation framework that inserts lightweight probes at function entry/exit for precise latency tracing.
+
+### Build with XRay enabled
+```bash
+cmake -S . -B build -DENABLE_XRAY=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build
+```
+
+### Collect a trace
+```bash
+XRAY_OPTIONS="patch_premain=true xray_mode=xray-basic verbosity=1" ./build/src/espacekilly
+```
+This produces a binary log file named `xray-log.espacekilly.<PID>`.
+
+### Analyse the trace
+```bash
+# Table of function timings sorted by median duration (descending)
+llvm-xray account xray-log.espacekilly.* --instr_map=./build/src/espacekilly --sort=med --sortorder=dsc
+
+# Or export to Chrome/Perfetto trace format for a visual flame chart
+llvm-xray convert --symbolize --instr_map=./build/src/espacekilly --output-format=trace_event xray-log.espacekilly.* > trace.json
+```
+Open `trace.json` in `chrome://tracing` or [Perfetto UI](https://ui.perfetto.dev/).
+
 ## Project configuration
 Update `project.json` to rename the project and UI:
 ```json

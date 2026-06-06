@@ -1,4 +1,4 @@
-set(LIBRARY_NAME libExample)
+set(LIBRARY_NAME matcher)
 
 set(BASE_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(INCLUDE_DIR ${BASE_INCLUDE_DIR}/${LIBRARY_NAME})
@@ -17,6 +17,7 @@ file(GLOB_RECURSE SOURCE_FILES
 add_library(${LIBRARY_NAME} STATIC
         ${SOURCE_FILES}
         ${INCLUDE_FILES}
+        include/matcher/ring_buffer.h
 )
 
 target_include_directories(${LIBRARY_NAME}
