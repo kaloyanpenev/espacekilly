@@ -23,7 +23,9 @@ public:
 		// this will throw if allocation is unsuccessful.
 		buf = static_cast<T*>(allocator.allocate(sizeof(T) * Capacity, alignof(T)));
 
-		for (T* p = buf; p != buf + Capacity; p++)
+		printf("allocate: %u\n", sizeof(T) * Capacity);
+
+		for (T* p = buf; p < buf + Capacity; p++)
 		{
 			// don't forward intentionally - otherwise the first constructor will consume the args.
 			// So if value is needed, must copy.

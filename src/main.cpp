@@ -1,4 +1,5 @@
 #include <matcher/dro/spsc-queue.hpp>
+#include <matcher/matcher.h>
 
 #include <chrono>
 #include <exception>
@@ -40,29 +41,30 @@ void readerWorker(Queue& fif)
 
 int main()
 {
-	try
-	{
-		auto spscFifo = Queue();
-		const auto now = std::chrono::steady_clock::now();
-		std::jthread writer{writerWorker, std::ref(spscFifo)};
-		std::this_thread::sleep_for(std::chrono::microseconds(1));
-		std::jthread reader{readerWorker, std::ref(spscFifo)};
-		writer.join();
-		reader.join();
-		const auto done = std::chrono::steady_clock::now();
-
-		std::println("end! duration: {}", std::chrono::duration_cast<std::chrono::microseconds>(done - now).count());
-	}
-	catch (const std::exception& e)
-	{
-		std::cerr << "Fatal: " << e.what() << '\n';
-		return 1;
-	}
-	catch (...)
-	{
-		std::cerr << "Fatal: unknown exception\n";
-		return 1;
-	}
+	matcher::startMatch();
+//	try
+//	{
+//		auto spscFifo = Queue();
+//		const auto now = std::chrono::steady_clock::now();
+//		std::jthread writer{writerWorker, std::ref(spscFifo)};
+//		std::this_thread::sleep_for(std::chrono::microseconds(1));
+//		std::jthread reader{readerWorker, std::ref(spscFifo)};
+//		writer.join();
+//		reader.join();
+//		const auto done = std::chrono::steady_clock::now();
+//
+//		std::println("end! duration: {}", std::chrono::duration_cast<std::chrono::microseconds>(done - now).count());
+//	}
+//	catch (const std::exception& e)
+//	{
+//		std::cerr << "Fatal: " << e.what() << '\n';
+//		return 1;
+//	}
+//	catch (...)
+//	{
+//		std::cerr << "Fatal: unknown exception\n";
+//		return 1;
+//	}
 
 	return 0;
 }
