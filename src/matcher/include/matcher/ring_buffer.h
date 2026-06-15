@@ -6,6 +6,7 @@
 #include <sys/mman.h>
 
 #include <cassert>
+#include <print>
 
 namespace pc
 {
@@ -17,13 +18,12 @@ class pmr_array final
 public:
 
 	template<typename... Args>
-	explicit pmr_array(std::pmr::monotonic_buffer_resource& allocator, Args&&... args) : alloc(&allocator)
+	explicit pmr_array(std::pmr::monotonic_buffer_resource& allocator, Args&&... args)
 	{
 		// allocate bytes for the capacity
 		// this will throw if allocation is unsuccessful.
-		buf = static_cast<T*>(allocator.allocate(sizeof(T) * Capacity, alignof(T)));
 
-		printf("allocate: %u\n", sizeof(T) * Capacity);
+		buf = static_cast<T*>(allocator.allocate(sizeof(T) * Capacity, alignof(T)));
 
 		for (T* p = buf; p < buf + Capacity; p++)
 		{
@@ -60,6 +60,5 @@ public:
 
 private:
 	T* buf;
-	std::pmr::monotonic_buffer_resource* alloc;
 };
 }

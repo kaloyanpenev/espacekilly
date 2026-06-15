@@ -29,6 +29,7 @@ struct Order
 };
 
 constexpr size_t kOrdersPerTick = 128;
+static_assert(std::has_single_bit(kOrdersPerTick));
 
 struct OrdersForTick
 {
@@ -39,8 +40,6 @@ struct OrdersForTick
 	pc::pmr_array<Order, kOrdersPerTick> orders;
 	std::pmr::unordered_map<size_t, size_t> idToIdx;
 
-	size_t priceInTicks = 0u;
-
 	size_t writeIndex = 0;
 	size_t readIndex = 0;
 
@@ -49,15 +48,16 @@ struct OrdersForTick
 };
 
 
-constexpr size_t kPriceLevelCount = 512;
-constexpr size_t kFulfilledOrdersCount = 512;
+constexpr size_t kPriceLevelCount = 8192;
+constexpr size_t kFulfilledOrdersCount = 1024;
+static_assert(std::has_single_bit(kPriceLevelCount));
+static_assert(std::has_single_bit(kFulfilledOrdersCount));
 
 // sizeof the ordersForTick struct + sizeof the orders array
 constexpr size_t ordersSizeInBytes = kPriceLevelCount * sizeof(OrdersForTick) + kPriceLevelCount * kOrdersPerTick * sizeof(Order);
 constexpr size_t fulfilledSizeInBytes = kFulfilledOrdersCount * sizeof(Order::id);
-constexpr size_t arenaSlack = kPriceLevelCount;
 
-constexpr size_t orderBookArenaSize = ordersSizeInBytes + fulfilledSizeInBytes + arenaSlack;
+constexpr size_t orderBookArenaSize = ordersSizeInBytes + fulfilledSizeInBytes;
 
 enum class Instrument : std::size_t
 {
@@ -100,23 +100,23 @@ private:
 	std::pmr::monotonic_buffer_resource arena;
 
 public:
-	size_t tickOffset = 0;
 	std::array<size_t, 2> counts{0,0}; // 0 for askCount, 1 for bidCount
 
 	size_t filledReadIdx = 0;
 	size_t filledWriteIdx = 0;
-	std::array<size_t, kFulfilledOrdersCount> fulfilled; // at most we will have orders per tick fulfilled
+	pc::pmr_array<size_t, kFulfilledOrdersCount> fulfilled; // at most we will have orders per tick fulfilled
 
-	std::array<size_t, 2> bestIdx{0, 0}; // 0 - ask, 1 - bid
+	std::array<size_t, 2> bestIdx{SIZE_MAX, SIZE_MAX}; // 0 - ask, 1 - bid.  size::max for unset.
 	pc::pmr_array<OrdersForTick, kPriceLevelCount> orders;
 
 	explicit OrderBook();
 };
 
+
 //int startMatch(std::shared_ptr<dro::SPSCQueue<OrderMessage>> messageQueue);
 int startMatch();
-void HandleLimitOrder(OrderMessage &ordMsg, OrderBook &symbol);
+bool HandleLimitOrder(OrderMessage &ordMsg, OrderBook &symbol);
 
-void HandleMarketOrder(OrderMessage &ordMsg, OrderBook &symbol, size_t limit);
+bool HandleMarketOrder(OrderMessage &ordMsg, OrderBook &symbol, size_t limit);
 
 }
