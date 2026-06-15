@@ -11,13 +11,12 @@
 namespace pc
 {
 
-template<typename T, size_t Capacity>
-	requires (Capacity > 0)
+template <typename T, size_t Capacity>
+	requires(Capacity > 0)
 class pmr_array final
 {
 public:
-
-	template<typename... Args>
+	template <typename... Args>
 	explicit pmr_array(std::pmr::monotonic_buffer_resource& allocator, Args&&... args)
 	{
 		// allocate bytes for the capacity
@@ -31,7 +30,6 @@ public:
 			// So if value is needed, must copy.
 			std::construct_at(p, args...);
 		}
-
 	}
 
 	~pmr_array()
@@ -52,9 +50,9 @@ public:
 	const T& operator[](size_t i) const noexcept { return buf[i]; }
 
 	T* begin() noexcept { return buf; }
-	T* end() noexcept{ return buf + Capacity; }
-	T* begin() const noexcept { return buf; }
-	T* end() const noexcept{ return buf + Capacity; }
+	T* end() noexcept { return buf + Capacity; }
+	const T* begin() const noexcept { return buf; }
+	const T* end() const noexcept { return buf + Capacity; }
 	auto rbegin() noexcept { return std::reverse_iterator(end()); }
 	auto rend() noexcept { return std::reverse_iterator(begin()); }
 

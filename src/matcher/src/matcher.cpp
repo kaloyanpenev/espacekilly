@@ -136,7 +136,7 @@ bool HandleMarketOrder(OrderMessage& ordMsg, OrderBook& symbol, size_t limit)
 		}
 
 		auto& readIdx = currTickOrders.readIndex;
-		auto& resting = currTickOrders.orders[readIdx];
+		auto& resting = currTickOrders.orders[readIdx & (currTickOrders.orders.size() - 1)];
 
 		ordMsg.order.quantityLots += resting.quantityLots; // fill towards zero
 
@@ -215,9 +215,10 @@ bool HandleLimitOrder(OrderMessage& ordMsg, OrderBook& symbol)
 	// TODO NOTE: assumes orders is not a ringbuffer. if ringbuffer, need to search for the level with that price ticks.
 	auto& currOrdersLevel = symbol.orders[ordMsg.priceTicksLimit];
 	currOrdersLevel.orders[currOrdersLevel.writeIndex++ & (currOrdersLevel.orders.size() - 1)] = std::move(ordMsg.order);
-	if (currOrdersLevel.writeIndex - currOrdersLevel.readIndex == currOrdersLevel.orders.size() - 1) [[unlikely]]
+	if (currOrdersLevel.writeIndex - currOrdersLevel.readIndex == currOrdersLevel.orders.size()) [[unlikely]]
 	{
 		std::println("full orders level: {}, readIdx = {}, writeIdx = {} ", ordMsg.priceTicksLimit, currOrdersLevel.readIndex, currOrdersLevel.writeIndex);
+		throw std::exception();
 	}
 	symbol.counts[orderIsBuy]++;
 
