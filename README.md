@@ -66,17 +66,17 @@ cmake --build build
 
 ### Collect a trace
 ```bash
-XRAY_OPTIONS="patch_premain=true xray_mode=xray-basic verbosity=1" ./build/src/espacekilly
+XRAY_OPTIONS="patch_premain=true xray_mode=xray-basic verbosity=1" ./src/exchange
 ```
-This produces a binary log file named `xray-log.espacekilly.<PID>`.
+This produces a binary log file named `xray-log.exchange.<PID>`.
 
 ### Analyse the trace
 ```bash
 # Table of function timings sorted by median duration (descending)
-llvm-xray account xray-log.espacekilly.* --instr_map=./build/src/espacekilly --sort=med --sortorder=dsc
+llvm-xray account xray-log.exchange.* --instr_map=./src/exchange --sort=med --sortorder=dsc
 
 # Or export to Chrome/Perfetto trace format for a visual flame chart
-llvm-xray convert --symbolize --instr_map=./build/src/espacekilly --output-format=trace_event xray-log.espacekilly.* > trace.json
+llvm-xray convert --symbolize --instr_map=./src/exchange --output-format=trace_event xray-log.exchange.* > trace.json
 ```
 Open `trace.json` in `chrome://tracing` or [Perfetto UI](https://ui.perfetto.dev/).
 

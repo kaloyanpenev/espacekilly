@@ -28,7 +28,7 @@ struct Order
 	std::int64_t quantityLots = 0;
 };
 
-constexpr size_t kOrdersPerTick = 128;
+constexpr size_t kOrdersPerTick = 8192;
 static_assert(std::has_single_bit(kOrdersPerTick));
 
 struct OrdersForTick
@@ -48,8 +48,8 @@ struct OrdersForTick
 };
 
 
-constexpr size_t kPriceLevelCount = 8192;
-constexpr size_t kFulfilledOrdersCount = 1024;
+constexpr size_t kPriceLevelCount = 128;
+constexpr size_t kFulfilledOrdersCount = 2048;
 static_assert(std::has_single_bit(kPriceLevelCount));
 static_assert(std::has_single_bit(kFulfilledOrdersCount));
 
@@ -71,10 +71,10 @@ enum class Instrument : std::size_t
 
 enum class OrderType : uint8_t
 {
-	Buy,
-	BuyLimit,
-	Sell,
-	SellLimit,
+	Buy = 0,
+	Sell = 1,
+	BuyLimit = 2,
+	SellLimit = 3,
 	StopSell,
 	StopSellLimit,
 	StopBuy,

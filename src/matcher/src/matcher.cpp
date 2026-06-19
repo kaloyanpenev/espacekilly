@@ -3,6 +3,19 @@
 #include <memory_resource>
 #include <ranges>
 #include <utility>
+#include <random>
+#include <thread>
+
+namespace
+{
+	size_t g_limitOrders = 0;
+	size_t g_marketOrders = 0;
+	size_t g_crossOrder = 0;
+	size_t g_restingOrder = 0;
+	size_t g_fullyFilledCrossOrder = 0;
+	size_t g_generatedMarkets = 0;
+	size_t g_generatedLimits = 0;
+}
 
 namespace matcher
 {
@@ -21,48 +34,52 @@ std::vector<OrderBook> initOrderBooks()
 	return symbols;
 }
 
+constexpr size_t generatedOrders = 1'000'000ul;
+
+void CreateOrders(dro::SPSCQueue<OrderMessage>& queue)
+{
+
+	//std::random_device rd;  // a seed source for the random number engine
+	std::mt19937 gen(5); // mersenne_twister_engine seeded with rd()
+
+	size_t id = 0;
+	for (size_t i = 0ul; i < generatedOrders; i++)
+	{
+		std::uniform_int_distribution<int64_t> distribLots(0, 20000);
+		std::uniform_int_distribution<size_t> distribTicks(20, 100);
+		std::uniform_int_distribution<int8_t> distribType(0, 3);
+
+		// generate random order type
+		int8_t ordTypeNum = distribType(gen);
+		OrderType ordType = static_cast<OrderType>(distribType(gen));
+
+		int64_t sign = (ordTypeNum < 2) ? 1 : -1; // -1 if selling
+		int64_t lots = distribLots(gen) * sign;
+
+		size_t ticks = distribTicks(gen);
+		size_t ordIsLimit = (ordType == OrderType::BuyLimit || ordType == OrderType::SellLimit);
+		g_generatedMarkets += !ordIsLimit;
+		g_generatedLimits += ordIsLimit;
+
+		queue.emplace(OrderMessage{.order = {.id = id++, .quantityLots = lots},
+				.instrumentId = Instrument::Time,
+				.priceTicksLimit = ordIsLimit * ticks,
+				.orderType = ordType});
+	}
+}
+
 int startMatch()
 {
 	auto orderBooks = initOrderBooks();
-	dro::SPSCQueue<OrderMessage> q{15000};
+	dro::SPSCQueue<OrderMessage> q{generatedOrders+1};
 
-	// 1) SellLimit rests at tick 502 — no matching buy exists yet
-	q.emplace(OrderMessage{.order = {.id = 1001, .quantityLots = -100},
-		.instrumentId = Instrument::Time,
-		.priceTicksLimit = 502,
-		.orderType = OrderType::SellLimit});
+	auto makeInput = std::jthread(&CreateOrders, std::ref(q));
 
-	// 2) SellLimit rests at tick 503 — also rests, one level above
-	q.emplace(OrderMessage{.order = {.id = 1002, .quantityLots = -50},
-		.instrumentId = Instrument::Time,
-		.priceTicksLimit = 503,
-		.orderType = OrderType::SellLimit});
-
-	// 3) BuyLimit at tick 500 — below all resting sells, so it just rests
-	q.emplace(OrderMessage{.order = {.id = 2001, .quantityLots = 75},
-		.instrumentId = Instrument::Time,
-		.priceTicksLimit = 500,
-		.orderType = OrderType::BuyLimit});
-
-	// 4) BuyLimit at tick 503 — crosses the resting sell at 502,
-	//    should fill 100 lots against order 1001, leaving 20 lots unfilled,
-	//    then attempt to fill against the sell at 503 (order 1002)
-	q.emplace(OrderMessage{.order = {.id = 2002, .quantityLots = 120},
-		.instrumentId = Instrument::Time,
-		.priceTicksLimit = 503,
-		.orderType = OrderType::BuyLimit});
-
-	// 5) Market Sell — fills against best resting buy (order 2001 at tick 500)
-	q.emplace(OrderMessage{
-		.order = {.id = 3001, .quantityLots = -40}, .instrumentId = Instrument::Time, .orderType = OrderType::Sell});
-
-	// 6) Market Buy — fills against best resting sell (whatever remains)
-	q.emplace(OrderMessage{
-		.order = {.id = 3002, .quantityLots = 30}, .instrumentId = Instrument::Time, .orderType = OrderType::Buy});
-
+	makeInput.join();
 	// TODO: stop order book
 
 	OrderMessage ordMsg{};
+	const auto start = std::chrono::system_clock::now();
 	while (q.try_pop(ordMsg))
 	{
 		auto& symbol = orderBooks[static_cast<size_t>(ordMsg.instrumentId)];
@@ -70,40 +87,53 @@ int startMatch()
 		// here we are not placing any new orders - we are simply filling it immediately with the best bid/ask.
 		if (ordMsg.orderType == OrderType::Buy || ordMsg.orderType == OrderType::Sell)
 		{
-			std::println("market order. Id: {}, quantity: {}, price: {}", ordMsg.order.id, ordMsg.order.quantityLots, ordMsg.priceTicksLimit);
+			//std::println("market order. Id: {}, quantity: {}, price: {}", ordMsg.order.id, ordMsg.order.quantityLots, ordMsg.priceTicksLimit);
 			bool filled = HandleMarketOrder(
 				ordMsg, symbol, ordMsg.orderType == OrderType::Buy ? std::numeric_limits<size_t>::max() : 0);
 			if (!filled)
 			{
-				throw "TODO handle me: not enough resting orders to complete order!";
+				//throw "TODO handle me: not enough resting orders to complete order!";
 			}
 		}
 		// here we will be potentially matching at a more granular level
 		else if (ordMsg.orderType == OrderType::BuyLimit || ordMsg.orderType == OrderType::SellLimit)
 		{
-			std::println("limit order. Id: {}, quantity: {}, price: {}", ordMsg.order.id, ordMsg.order.quantityLots, ordMsg.priceTicksLimit);
+			//std::println("limit order. Id: {}, quantity: {}, price: {}", ordMsg.order.id, ordMsg.order.quantityLots, ordMsg.priceTicksLimit);
 			bool filled = HandleLimitOrder(ordMsg, symbol);
 			if (!filled)
 			{
-				std::println("limit order unfulfilled. Id: {}, quantity: {}, price: {}", ordMsg.order.id, ordMsg.order.quantityLots, ordMsg.priceTicksLimit);
+				//std::println("limit order unfulfilled. Id: {}, quantity: {}, price: {}", ordMsg.order.id, ordMsg.order.quantityLots, ordMsg.priceTicksLimit);
 			}
 
 		}
 	}
+	const auto finish = std::chrono::system_clock::now();
+	const size_t elapsed = std::chrono::duration_cast<std::chrono::microseconds>(finish - start).count();
+	std::println("elapsed: {}", elapsed);
+	std::println("elapsed ns per order: {}", static_cast<double>((finish - start).count()) / generatedOrders);
+	std::println("executed_limits: {}, resting_crosses: {}, fully_filled_crosses: {}, resting: {}",
+				 g_limitOrders,
+				 g_crossOrder - g_fullyFilledCrossOrder,
+				 g_fullyFilledCrossOrder,
+				 g_restingOrder);
+	std::println("executed_markets: {}", g_marketOrders - g_crossOrder);
+	std::println("generated_markets: {}, generated_limits: {}", g_generatedMarkets, g_generatedLimits);
+	std::println("book state: ask: {}, bid: {}", orderBooks[static_cast<size_t>(Instrument::Time)].bestIdx[0],  orderBooks[static_cast<size_t>(Instrument::Time)].bestIdx[1]);
 
-	const auto& symbol = orderBooks[static_cast<size_t>(Instrument::Time)];
-	for (const auto& fulfilled : symbol.fulfilled)
-	{
-		if (fulfilled != 0)
-		{
-			std::println("fulfilled: {}", fulfilled);
-		}
-	}
+//	const auto& symbol = orderBooks[static_cast<size_t>(Instrument::Time)];
+//	for (const auto& fulfilled : symbol.fulfilled)
+//	{
+//		if (fulfilled != 0)
+//		{
+//			std::println("fulfilled: {}", fulfilled);
+//		}
+//	}
 	return 0;
 }
 
 bool HandleMarketOrder(OrderMessage& ordMsg, OrderBook& symbol, size_t limit)
 {
+	g_marketOrders++;
 	bool orderIsBuy = ordMsg.orderType == OrderType::Buy || ordMsg.orderType == OrderType::BuyLimit; // 1 for buy, 0 for sell
 	size_t& bestIdx = symbol.bestIdx[!orderIsBuy];         // looking for best bid when order type is sell and vv.
 
@@ -179,6 +209,7 @@ bool HandleMarketOrder(OrderMessage& ordMsg, OrderBook& symbol, size_t limit)
 bool HandleLimitOrder(OrderMessage& ordMsg, OrderBook& symbol)
 {
 
+	g_limitOrders++;
 	bool orderIsBuy = ordMsg.orderType == OrderType::BuyLimit;
 
 	const size_t& bestOppositeIdx = symbol.bestIdx[!orderIsBuy]; // looking for best bid when order type is sell and vv.
@@ -192,18 +223,21 @@ bool HandleLimitOrder(OrderMessage& ordMsg, OrderBook& symbol)
 		const bool betterThanBestSell = !orderIsBuy && ordMsg.priceTicksLimit <= bestOppositeIdx;
 		if (betterThanBestBuy || betterThanBestSell)
 		{
-
+			g_crossOrder++;
 			bool filled = HandleMarketOrder(ordMsg, symbol, ordMsg.priceTicksLimit);
 			// we have now handled whatever we can - check if we could fully fulfill the order.
 			if (filled)
 			{
+				g_fullyFilledCrossOrder++;
 				assert(ordMsg.order.quantityLots == 0);
 				return filled;
 			}
 		}
 	}
+
 	// 2) no immediate match or resting remainder left:
 	// add the order to its requested level
+	g_restingOrder++;
 
 	if (symbol.bestIdx[orderIsBuy] == SIZE_MAX)
 	{

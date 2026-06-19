@@ -1,6 +1,5 @@
 # Build directories and binary files
-build/
-build-wasm/
+build*/
 out/
 out/coverage/*
 cmake-build-*/

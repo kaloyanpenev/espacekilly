@@ -31,11 +31,13 @@ if(MSVC)
   set(CMAKE_CXX_FLAGS_DEBUG "/Od /Zi /MDd" CACHE STRING "Debug compiler flags" FORCE)
   set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "/O2 /Zi /MD" CACHE STRING "RelWithDebInfo compiler flags" FORCE)
   set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG /MD" CACHE STRING "Release compiler flags" FORCE)
+  set(CMAKE_CXX_FLAGS_RELEASEO3 "/O3 /DNDEBUG /MD" CACHE STRING "ReleaseO3 compiler flags" FORCE)
 else()
   # GCC/Clang optimization flags
   set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g" CACHE STRING "Debug compiler flags" FORCE)
   set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g" CACHE STRING "RelWithDebInfo compiler flags" FORCE)
   set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "Release compiler flags" FORCE)
+  set(CMAKE_CXX_FLAGS_RELEASEO3 "-O3 -DNDEBUG" CACHE STRING "ReleaseO3 compiler flags" FORCE)
 endif()
 
 # CMake modules
