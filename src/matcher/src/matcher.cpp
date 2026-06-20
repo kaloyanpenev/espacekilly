@@ -14,6 +14,7 @@ namespace
 	size_t g_restingOrder = 0;
 	size_t g_fullyFilledCrossOrder = 0;
 	size_t g_generatedMarkets = 0;
+	size_t g_generatedBids = 0;
 	size_t g_generatedLimits = 0;
 }
 
@@ -34,19 +35,19 @@ std::vector<OrderBook> initOrderBooks()
 	return symbols;
 }
 
-constexpr size_t generatedOrders = 1'000'000ul;
+constexpr size_t generatedOrders = 100'000'000ul;
 
 void CreateOrders(dro::SPSCQueue<OrderMessage>& queue)
 {
 
 	//std::random_device rd;  // a seed source for the random number engine
-	std::mt19937 gen(5); // mersenne_twister_engine seeded with rd()
+	std::mt19937 gen(75); // mersenne_twister_engine seeded with rd()
 
 	size_t id = 0;
 	for (size_t i = 0ul; i < generatedOrders; i++)
 	{
 		std::uniform_int_distribution<int64_t> distribLots(0, 20000);
-		std::uniform_int_distribution<size_t> distribTicks(20, 100);
+		std::uniform_int_distribution<size_t> distribTicks(40, 60);
 		std::uniform_int_distribution<int8_t> distribType(0, 3);
 
 		// generate random order type
@@ -60,6 +61,7 @@ void CreateOrders(dro::SPSCQueue<OrderMessage>& queue)
 		size_t ordIsLimit = (ordType == OrderType::BuyLimit || ordType == OrderType::SellLimit);
 		g_generatedMarkets += !ordIsLimit;
 		g_generatedLimits += ordIsLimit;
+		g_generatedBids += ordTypeNum < 2;
 
 		queue.emplace(OrderMessage{.order = {.id = id++, .quantityLots = lots},
 				.instrumentId = Instrument::Time,
@@ -73,9 +75,10 @@ int startMatch()
 	auto orderBooks = initOrderBooks();
 	dro::SPSCQueue<OrderMessage> q{generatedOrders+1};
 
-	auto makeInput = std::jthread(&CreateOrders, std::ref(q));
+	//auto makeInput = std::jthread(&CreateOrders, std::ref(q));
 
-	makeInput.join();
+	CreateOrders(q);
+	//makeInput.join();
 	// TODO: stop order book
 
 	OrderMessage ordMsg{};
@@ -92,8 +95,9 @@ int startMatch()
 				ordMsg, symbol, ordMsg.orderType == OrderType::Buy ? std::numeric_limits<size_t>::max() : 0);
 			if (!filled)
 			{
-				//throw "TODO handle me: not enough resting orders to complete order!";
+				// return unableToFill;
 			}
+			// return filled;
 		}
 		// here we will be potentially matching at a more granular level
 		else if (ordMsg.orderType == OrderType::BuyLimit || ordMsg.orderType == OrderType::SellLimit)
@@ -102,9 +106,9 @@ int startMatch()
 			bool filled = HandleLimitOrder(ordMsg, symbol);
 			if (!filled)
 			{
-				//std::println("limit order unfulfilled. Id: {}, quantity: {}, price: {}", ordMsg.order.id, ordMsg.order.quantityLots, ordMsg.priceTicksLimit);
+				// return leftAsResting;
 			}
-
+			// return filled;
 		}
 	}
 	const auto finish = std::chrono::system_clock::now();
@@ -117,17 +121,9 @@ int startMatch()
 				 g_fullyFilledCrossOrder,
 				 g_restingOrder);
 	std::println("executed_markets: {}", g_marketOrders - g_crossOrder);
-	std::println("generated_markets: {}, generated_limits: {}", g_generatedMarkets, g_generatedLimits);
+	std::println("generated_markets: {}, generated_limits: {}, generated_bids: {}, generated_asks: {}", g_generatedMarkets, g_generatedLimits, g_generatedBids, g_generatedLimits + g_generatedMarkets - g_generatedBids);
 	std::println("book state: ask: {}, bid: {}", orderBooks[static_cast<size_t>(Instrument::Time)].bestIdx[0],  orderBooks[static_cast<size_t>(Instrument::Time)].bestIdx[1]);
 
-//	const auto& symbol = orderBooks[static_cast<size_t>(Instrument::Time)];
-//	for (const auto& fulfilled : symbol.fulfilled)
-//	{
-//		if (fulfilled != 0)
-//		{
-//			std::println("fulfilled: {}", fulfilled);
-//		}
-//	}
 	return 0;
 }
 
@@ -147,7 +143,7 @@ bool HandleMarketOrder(OrderMessage& ordMsg, OrderBook& symbol, size_t limit)
 	// quantityLots is negative if the order is a sell.
 	// if we go above 0, it means we are overfilled: end -> direction is -1 so we flip it
 	while (orderCount > 0 &&
-		bestIdx != SIZE_MAX &&
+		bestIdx != invalidBestIdx &&
 		ordMsg.order.quantityLots * direction > 0)
 	{
 		auto& currTickOrders = symbol.orders[bestIdx & (symbol.orders.size() - 1)];
@@ -156,8 +152,8 @@ bool HandleMarketOrder(OrderMessage& ordMsg, OrderBook& symbol, size_t limit)
 			// level is empty; look for more expensive asks or cheaper bids
 			bestIdx += direction;
 			// check if we're past the limit - in that case, stop.
-			// in a market sell, limit will be 0UL, so bestIdx < limit is always false:
-			// 		- in this case, we rely on underflow to max, which breaks the loop from the while condition and sets bestIdx to the correct sentinel.
+			// limit == inf if order is market buy, limit == 0 if order is market sell
+			// bestIdx can wrap around to size_max if this is a market sell order, and break due to bestIdx == invalidBestIdx
 			if ((orderIsBuy && bestIdx > limit) || (!orderIsBuy && bestIdx < limit))
 			{
 				break; // could not fill
@@ -191,7 +187,7 @@ bool HandleMarketOrder(OrderMessage& ordMsg, OrderBook& symbol, size_t limit)
 	// if no more orders left, set bestIdx to SIZE_MAX
 	if (orderCount == 0) [[unlikely]]
 	{
-		bestIdx = SIZE_MAX;
+		bestIdx = invalidBestIdx;
 	}
 
 	bool filled  = ordMsg.order.quantityLots * direction <= 0;
@@ -217,7 +213,7 @@ bool HandleLimitOrder(OrderMessage& ordMsg, OrderBook& symbol)
 	// 1) match - if the incoming crosses over the other type's best idx
 	// then fill it, starting with the best idx level. any remainder, leave in that level.
 
-	if (bestOppositeIdx != SIZE_MAX)
+	if (bestOppositeIdx != invalidBestIdx)
 	{
 		const bool betterThanBestBuy = orderIsBuy && ordMsg.priceTicksLimit >= bestOppositeIdx;
 		const bool betterThanBestSell = !orderIsBuy && ordMsg.priceTicksLimit <= bestOppositeIdx;
@@ -239,7 +235,7 @@ bool HandleLimitOrder(OrderMessage& ordMsg, OrderBook& symbol)
 	// add the order to its requested level
 	g_restingOrder++;
 
-	if (symbol.bestIdx[orderIsBuy] == SIZE_MAX)
+	if (symbol.bestIdx[orderIsBuy] == invalidBestIdx)
 	{
 		symbol.bestIdx[orderIsBuy] = ordMsg.priceTicksLimit;
 	}
@@ -257,8 +253,8 @@ bool HandleLimitOrder(OrderMessage& ordMsg, OrderBook& symbol)
 	symbol.counts[orderIsBuy]++;
 
 	// check if this is the new best price - update best idx to be that price level.
-	if ((orderIsBuy && ordMsg.priceTicksLimit > bestSameIdx)
-		|| (!orderIsBuy && ordMsg.priceTicksLimit < bestSameIdx))
+	if (bestSameIdx == invalidBestIdx ||
+		(orderIsBuy && ordMsg.priceTicksLimit > bestSameIdx) || (!orderIsBuy && ordMsg.priceTicksLimit < bestSameIdx))
 	{
 		bestSameIdx = ordMsg.priceTicksLimit;
 	}

@@ -83,14 +83,15 @@ enum class OrderType : uint8_t
 
 struct OrderMessage
 {
-	Instrument instrumentId;
 	Order order;
+	Instrument instrumentId;
 	size_t priceTicksLimit;
 	size_t priceTicksStop;
 	OrderType orderType;
 };
 
 
+constexpr size_t invalidBestIdx = SIZE_MAX; // needs to be size_max for underflow logic to work right
 // Order book per instrument
 class OrderBook
 {
@@ -106,7 +107,7 @@ public:
 	size_t filledWriteIdx = 0;
 	pc::pmr_array<size_t, kFulfilledOrdersCount> fulfilled; // at most we will have orders per tick fulfilled
 
-	std::array<size_t, 2> bestIdx{SIZE_MAX, SIZE_MAX}; // 0 - ask, 1 - bid.  size::max for unset.
+	std::array<size_t, 2> bestIdx{invalidBestIdx, invalidBestIdx}; // 0 - ask, 1 - bid.  size::max for unset.
 	pc::pmr_array<OrdersForTick, kPriceLevelCount> orders;
 
 	explicit OrderBook();
