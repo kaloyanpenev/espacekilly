@@ -1,0 +1,10 @@
+#!/bin/bash
+
+cd ../
+SP=./
+./build-udp/udp_client/udp_client > $SP/client.out 2>&1 &                                                                                                 
+CL=$!                                                                                                                                                     
+sleep 0.3                                                                                                                                                 
+./build-udp/udp_broadcaster/udp_broadcaster 20 >/dev/null                                                                                                 
+wait $CL                                                                                                                                                  
+cat $SP/client.out

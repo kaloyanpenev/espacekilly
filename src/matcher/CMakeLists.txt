@@ -18,6 +18,7 @@ add_library(${LIBRARY_NAME} STATIC
         ${SOURCE_FILES}
         ${INCLUDE_FILES}
         include/matcher/ring_buffer.h
+        include/matcher/perfController.h
 )
 
 target_include_directories(${LIBRARY_NAME}

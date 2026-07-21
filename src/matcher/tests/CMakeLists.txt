@@ -5,7 +5,7 @@ if(BUILD_TESTING)
   add_executable(${TESTS_NAME}
     matcherTests.cpp
     edgeTests.cpp
-          edgeTests.cpp
+    cancelTests.cpp
   )
 
   target_link_libraries(${TESTS_NAME} PRIVATE

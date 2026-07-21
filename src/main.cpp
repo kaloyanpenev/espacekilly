@@ -1,70 +1,38 @@
 #include <matcher/dro/spsc-queue.hpp>
 #include <matcher/matcher.h>
 
-#include <chrono>
-#include <exception>
-#include <iostream>
-#include <print>
-#include <ranges>
-#include <thread>
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 
-struct sadstr
+#include <sched.h>
+#include <cstdio>
+#include <cstdlib>
+
+// Pin the calling thread to a single logical CPU.
+// Passing pid 0 means "the thread making this call".
+void pin_to_cpu(int cpu)
 {
-	sadstr() noexcept { arr.fill(512UL); }
+	cpu_set_t set;                       // a fixed-size bitmask, one bit per CPU
+	CPU_ZERO(&set);                      // clear every bit
+	CPU_SET(cpu, &set);                  // set the bit for our target CPU
 
-	std::array<size_t, 32> arr;
-};
-
-constexpr size_t ops = 2000UL;
-using Queue = dro::SPSCQueue<sadstr, ops>;
-
-void writerWorker(Queue& fif)
-{
-	for ([[maybe_unused]] const auto i : std::ranges::views::iota(0UL, ops))
-	{
-		fif.emplace();
+	// args: pid (0 = self), size of the mask, pointer to the mask
+	if (sched_setaffinity(0, sizeof(set), &set) != 0) {
+		std::perror("sched_setaffinity");   // prints the errno reason
+		std::exit(EXIT_FAILURE);
 	}
-};
-
-void readerWorker(Queue& fif)
-{
-	sadstr s{};
-	size_t opcount = ops;
-	while (opcount)
-	{
-		if (fif.try_pop(s))
-		{
-			opcount--;
-		}
-	}
-};
+}
 
 int main()
 {
+	constexpr int target_cpu = 8; // isolating cpu8
+
+	pin_to_cpu(target_cpu);
+
+	std::printf("running on CPU %d\n", sched_getcpu());
+
 	matcher::startMatch();
-//	try
-//	{
-//		auto spscFifo = Queue();
-//		const auto now = std::chrono::steady_clock::now();
-//		std::jthread writer{writerWorker, std::ref(spscFifo)};
-//		std::this_thread::sleep_for(std::chrono::microseconds(1));
-//		std::jthread reader{readerWorker, std::ref(spscFifo)};
-//		writer.join();
-//		reader.join();
-//		const auto done = std::chrono::steady_clock::now();
-//
-//		std::println("end! duration: {}", std::chrono::duration_cast<std::chrono::microseconds>(done - now).count());
-//	}
-//	catch (const std::exception& e)
-//	{
-//		std::cerr << "Fatal: " << e.what() << '\n';
-//		return 1;
-//	}
-//	catch (...)
-//	{
-//		std::cerr << "Fatal: unknown exception\n";
-//		return 1;
-//	}
 
 	return 0;
 }

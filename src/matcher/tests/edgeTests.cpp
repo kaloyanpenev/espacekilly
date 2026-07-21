@@ -14,151 +14,178 @@ struct EdgeTest : ::testing::Test
 {
 	OrderBook book;
 };
-
-// Rest `n` non-crossing sells at `tick` (no bids exist, so none of them match).
-void fillLevelWithSells(OrderBook& book, std::size_t tick, std::size_t n)
-{
-	for (std::size_t i = 0; i < n; ++i)
-	{
-		restOrMatch(book, limitOrder(/*id=*/10'000 + i, /*qty=*/-1, tick, /*buy=*/false));
-	}
-}
 } // namespace
 
 // ===========================================================================
-// Suite 5 — Full ring buffer (TODO: should throw; currently warns + wraps)
-// ===========================================================================
-
-// Disabled TODO-driver. The per-level write currently masks with
-// & (kOrdersPerTick-1) and only println()s when the level is full
-// (matcher.cpp:218), silently overwriting slot 0 on the (capacity)th order.
-// Enable once HandleLimitOrder throws instead of wrapping.
-TEST_F(EdgeTest, FullLevelThrows)
-{
-	fillLevelWithSells(book, /*tick=*/600, matcher::kOrdersPerTick - 1);
-	EXPECT_THROW(restOrMatch(book, limitOrder(99'999, -1, 600, false)), std::exception);
-}
-
-// ===========================================================================
-// Suite 6 — Underflow / overflow
+// Suite 5 — Underflow / boundary walking
 // ===========================================================================
 
 TEST_F(EdgeTest, MarketSellExceedsAllBidLiquidityTerminatesCleanly)
 {
-	restOrMatch(book, limitOrder(2001, 75, 500, /*buy=*/true));
+	restOrMatch(book, limitOrder(2001, 75, 50, /*buy=*/true));
 
 	auto msg = marketOrder(3001, -1000, /*buy=*/false);
-	EXPECT_FALSE(marketInto(book, msg)); // only 75 available
+	expectResponse(marketInto(book, msg), Result::PartiallyFilled, 3001, -925); // only 75 available
 
 	expectBest(book, kUnset, /*bid=*/kUnset); // bid side emptied -> sentinel reset
 	expectCounts(book, 0, 0);
-	expectEmptyLevel(book, 500);
-	expectFulfilled(book, {2001});             // resting bid consumed, incoming not committed
-	EXPECT_EQ(msg.order.quantityLots, -925);   // unfilled remainder preserved
+	expectEmptyLevel(book, 50);
+	expectFulfilled(book, {{2001, 0, Result::Filled}});
+	EXPECT_EQ(msg.order.quantityLots, -925); // unfilled remainder preserved
+	expectBookConsistent(book);
 }
 
 TEST_F(EdgeTest, MarketSellWalksDownAcrossEmptyLevelsWithoutUnderflow)
 {
-	restOrMatch(book, limitOrder(2001, 10, 500, true)); // bid 500
-	restOrMatch(book, limitOrder(2002, 10, 498, true)); // bid 498 (499 empty)
+	restOrMatch(book, limitOrder(2001, 10, 50, true)); // bid 50
+	restOrMatch(book, limitOrder(2002, 10, 48, true)); // bid 48 (49 empty)
 
 	auto msg = marketOrder(3001, -1000, /*buy=*/false);
-	EXPECT_FALSE(marketInto(book, msg)); // sweeps both bids, then runs out
+	expectResponse(marketInto(book, msg), Result::PartiallyFilled, 3001, -980); // sweeps both, runs out
 
-	// best bid walked 500 -> 499 (empty) -> 498, consumed both, reset to sentinel
+	// best bid walked 50 -> 49 (empty) -> 48, consumed both, reset to unset
 	// (must NOT underflow past 0 / wrap while liquidity remained)
 	expectBest(book, kUnset, kUnset);
 	expectCounts(book, 0, 0);
-	expectFulfilled(book, {2001, 2002});
+	expectFulfilled(book, {{2001, 0, Result::Filled}, {2002, 0, Result::Filled}});
 	EXPECT_EQ(msg.order.quantityLots, -980);
+	expectBookConsistent(book);
 }
 
-// Disabled TODO-driver. The limit-rest path indexes orders[priceTicksLimit]
-// without masking (matcher.cpp:216) while the market path masks
-// (matcher.cpp:123), so a tick >= kPriceLevelCount is out of bounds today.
-// Enable once large ticks are masked or rejected.
+TEST_F(EdgeTest, MarketSellAtTickZeroFillsWithoutWrapping)
+{
+	restOrMatch(book, limitOrder(2001, 10, 0, true)); // bid at the lowest possible tick
+
+	expectResponse(marketInto(book, marketOrder(3001, -10, false)), Result::Filled, 3001, 0);
+
+	expectBest(book, kUnset, kUnset);
+	expectCounts(book, 0, 0);
+	expectFulfilled(book, {{2001, 0, Result::Filled}});
+	expectBookConsistent(book);
+}
+
+TEST_F(EdgeTest, LimitCrossStopsAtItsOwnPrice)
+{
+	restOrMatch(book, limitOrder(1001, -10, 52, false));
+	restOrMatch(book, limitOrder(1002, -10, 55, false)); // above the incoming limit
+
+	// buy limited to 53: fills the 52 ask, must NOT reach the 55 ask; the
+	// 10-lot remainder rests at 53
+	expectResponse(restOrMatch(book, limitOrder(2001, 20, 53, true)), Result::Resting, 2001, 10);
+
+	expectCounts(book, 1, 1);
+	expectLevel(book, 55, {{1002, -10}});
+	expectLevel(book, 53, {{2001, 10}});
+	expectFulfilled(book, {{1001, 0, Result::Filled}});
+	expectBookConsistent(book);
+}
+
+// Disabled TODO-driver / bug report. The limit-rest path indexes
+// orders[priceTicksLimit] unmasked (HandleLimitOrder) while the market path
+// masks bestIdx, so a tick >= kPriceLevelCount writes out of bounds today.
+// Enable once large ticks are masked or rejected on ingest.
 TEST_F(EdgeTest, DISABLED_BigTickRejected)
 {
 	EXPECT_ANY_THROW(restOrMatch(book, limitOrder(7001, -10, matcher::kPriceLevelCount, false)));
 }
 
 // ===========================================================================
-// Suite 7 — Unlikely cases
+// Suite 6 — Unlikely cases
 // ===========================================================================
 
-// A zero-quantity market order never enters the fill loop (quantityLots*dir == 0),
-// so it consumes nothing but is currently reported as "filled" and recorded.
+// QUIRK: a zero-quantity market order never enters the fill loop
+// (quantityLots * direction == 0) so it consumes nothing, but the handler
+// classifies it as PartiallyFilled (unfilled=0, rejected=1 indexes the middle
+// of the result array) rather than Rejected. matchAllOrders guards against
+// this by rejecting zero-qty requests before they reach the handler; this
+// test documents the raw handler behaviour.
 TEST_F(EdgeTest, ZeroQuantityMarketOrderConsumesNothing)
 {
-	restOrMatch(book, limitOrder(1001, -50, 502, false));
+	restOrMatch(book, limitOrder(1001, -50, 52, false));
 
-	EXPECT_TRUE(marketInto(book, marketOrder(3000, 0, /*buy=*/true)));
+	expectResponse(marketInto(book, marketOrder(3000, 0, /*buy=*/true)), Result::PartiallyFilled, 3000, 0);
 
-	// resting ask untouched
-	expectBest(book, /*ask=*/502, /*bid=*/kUnset);
+	// resting ask untouched, nothing recorded
+	expectBest(book, /*ask=*/52, /*bid=*/kUnset);
 	expectCounts(book, 1, 0);
-	expectLevel(book, 502, 0, 1, {{1001, -50}});
-	expectFulfilled(book, {3000}); // zero-qty order recorded as filled (quirk)
+	expectLevel(book, 52, {{1001, -50}});
+	expectFulfilled(book, {});
+	expectBookConsistent(book);
 }
 
-// A price level flips sell -> resting-buy -> sell again, all sharing one queue.
-// Exercises the readIndex advance invariant across side flips.
+// A price level flips sell -> resting-buy -> sell again, all sharing one
+// intrusive list. Exercises unlink/append correctness across side flips.
 TEST_F(EdgeTest, AlternatingSidesAtSameLevel)
 {
-	restOrMatch(book, limitOrder(1001, -100, 500, false)); // sell rests
-	restOrMatch(book, limitOrder(2002, 150, 500, true));   // buys 100, 50 buy rests at 500
-	EXPECT_TRUE(restOrMatch(book, limitOrder(3003, -30, 500, false))); // sell hits resting buy
+	restOrMatch(book, limitOrder(1001, -100, 50, false)); // sell rests
+	restOrMatch(book, limitOrder(2002, 150, 50, true));   // buys 100, 50 buy rests at 50
+	// sell hits the resting buy
+	expectResponse(restOrMatch(book, limitOrder(3003, -30, 50, false)), Result::Filled, 3003, 0);
 
-	expectBest(book, /*ask=*/kUnset, /*bid=*/500);
+	expectBest(book, /*ask=*/kUnset, /*bid=*/50);
 	expectCounts(book, 0, 1);
-	// queue: [0]=consumed sell, [1]=buy now 20 left; read still past the sell
-	expectLevel(book, 500, /*read=*/1, /*write=*/2, {{2002, 20}});
-	expectFulfilled(book, {1001, 3003});
+	expectLevel(book, 50, {{2002, 20}});
+	expectFulfilled(book, {{1001, 0, Result::Filled}, {2002, 20, Result::PartiallyFilled}});
+	expectBookConsistent(book);
 }
+
+// ===========================================================================
+// Suite 7 — Ring wrap and node-pool churn at scale
+// ===========================================================================
 
 // Drive more than kFulfilledOrdersCount commits to verify the fulfilled ring
-// keeps a monotonic write index and wraps via the mask without corruption.
-// Each cross uses its own tick so no single price level accumulates >2 orders
-// (which would hit the unmasked-read bug exercised by the DISABLED test below).
-TEST_F(EdgeTest, FulfilledRingWrapsAround)
+// keeps a monotonic write index and wraps via the mask without corruption,
+// and that rest/fill node recycling holds up under churn at a single level.
+TEST_F(EdgeTest, FulfilledRingWrapsAcrossRepeatedCrosses)
 {
-	const std::size_t crosses = matcher::kFulfilledOrdersCount; // 2 commits each -> 2x capacity
-	std::size_t lastResting = 0, lastIncoming = 0;
+	const std::size_t crosses = 2 * matcher::kFulfilledOrdersCount + 5; // wraps the ring twice
+	const std::size_t tick = 60;
+	std::size_t lastResting = 0;
 	for (std::size_t i = 0; i < crosses; ++i)
 	{
-		const std::size_t tick = 700 + i; // distinct level per cross, stays < kPriceLevelCount
 		lastResting = 40'000 + i;
-		lastIncoming = 80'000 + i;
 		restOrMatch(book, limitOrder(lastResting, -10, tick, false)); // sell rests
-		ASSERT_TRUE(restOrMatch(book, limitOrder(lastIncoming, 10, tick, true))); // buy fully consumes it
-	}
-
-	const std::size_t mask = book.fulfilled.size() - 1;
-	EXPECT_EQ(book.filledWriteIdx, 2 * crosses); // monotonic, not wrapped
-	// last two committed entries: resting then incoming of the final cross
-	EXPECT_EQ(book.fulfilled[(book.filledWriteIdx - 2) & mask], lastResting);
-	EXPECT_EQ(book.fulfilled[(book.filledWriteIdx - 1) & mask], lastIncoming);
-	// every cross flattened its own level
-	expectBest(book, kUnset, kUnset);
-	expectCounts(book, 0, 0);
-}
-
-// Disabled TODO-driver / bug report. A single price level cycled past
-// kOrdersPerTick cumulative orders breaks: HandleLimitOrder masks the WRITE
-// index (matcher.cpp:217) but HandleMarketOrder reads orders[readIndex]
-// UNMASKED (matcher.cpp:139). Once readIndex reaches kOrdersPerTick the match
-// reads/writes out of bounds, so the (capacity+1)-th cross fails to fill and the
-// incoming buy wrongly rests. Repeatedly crossing one level should keep working.
-// Enable once the read index is masked the same way as the write index.
-TEST_F(EdgeTest, LevelCyclesPastCapacity)
-{
-	const std::size_t tick = 700;
-	for (std::size_t i = 0; i < matcher::kOrdersPerTick + 4; ++i)
-	{
-		restOrMatch(book, limitOrder(40'000 + i, -10, tick, false));
-		EXPECT_TRUE(restOrMatch(book, limitOrder(80'000 + i, 10, tick, true)))
+		// buy fully consumes it
+		ASSERT_EQ(restOrMatch(book, limitOrder(80'000 + i, 10, tick, true)).result, Result::Filled)
 			<< "cross " << i << " should fully fill";
 	}
+
+	EXPECT_EQ(book.filledWriteIdx, crosses); // one ring entry per consumed resting; monotonic, not wrapped
+	const std::size_t mask = book.fulfilled.size() - 1;
+	const matcher::MessageResponse& last = book.fulfilled[(book.filledWriteIdx - 1) & mask];
+	ASSERT_TRUE(last.oOrder.has_value());
+	EXPECT_EQ(last.oOrder->id, lastResting);
+	EXPECT_EQ(last.result, Result::Filled);
+
 	expectBest(book, kUnset, kUnset);
 	expectCounts(book, 0, 0);
+	EXPECT_TRUE(book.idToOrder.empty());
+	expectBookConsistent(book);
+}
+
+// A single level holds far more simultaneous orders than the old per-level
+// ring capacity ever allowed; one market order then sweeps them all. Also
+// pushes filledWriteIdx past the ring size within ONE handler call — see the
+// fulfilled-ring overrun flag in the review notes: entries written here
+// overwrite undrained ones, but the book itself must stay correct.
+TEST_F(EdgeTest, MarketSweepOfDeepLevelClearsBook)
+{
+	const std::size_t depth = matcher::kFulfilledOrdersCount + 100;
+	const std::size_t tick = 55;
+	for (std::size_t i = 0; i < depth; ++i)
+	{
+		restOrMatch(book, limitOrder(10'000 + i, -1, tick, false));
+	}
+	expectCounts(book, depth, 0);
+
+	expectResponse(
+		marketInto(book, marketOrder(90'000, static_cast<std::int64_t>(depth), /*buy=*/true)),
+		Result::Filled, 90'000, 0);
+
+	EXPECT_EQ(book.filledWriteIdx, depth);
+	expectBest(book, kUnset, kUnset);
+	expectCounts(book, 0, 0);
+	expectEmptyLevel(book, tick);
+	EXPECT_TRUE(book.idToOrder.empty());
+	expectBookConsistent(book);
 }

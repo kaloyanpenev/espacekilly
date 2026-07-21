@@ -2,6 +2,7 @@
 
 #include "defs.h"
 #include "dro/spsc-queue.hpp"
+#include "hugepage_allocation.h"
 #include "ring_buffer.h"
 
 #include <cstdint>
@@ -9,6 +10,7 @@
 #include <memory>
 #include <memory_resource>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 namespace matcher
@@ -22,14 +24,42 @@ namespace
 #define ALIGNED alignas(cacheLineSize)
 }
 
-struct Order
+using OrderID = std::size_t;
+using MessageID = std::size_t;
+
+enum class OrderType : uint8_t
 {
-	std::size_t id = 0;
-	std::int64_t quantityLots = 0;
+	Buy = 0,
+	BuyLimit = 1,
+	Sell = 2,
+	SellLimit = 3,
+	// TODO: stop book fairy, separate process.
 };
 
-constexpr size_t kOrdersPerTick = 8192;
-static_assert(std::has_single_bit(kOrdersPerTick));
+struct Order
+{
+	OrderID id = 0;
+	std::int64_t quantityLots = 0; // positive for buy orders. negative for sell orders.
+};
+
+struct OrderNode
+{
+	Order order;
+
+	OrderNode* next{nullptr};
+	OrderNode* prev{nullptr};
+};
+
+namespace intrusiveList
+{
+	// list ops
+	bool isValidNode(const OrderNode& listSentinel, OrderNode* n);
+	OrderNode* tail(const OrderNode& listSentinel);
+	OrderNode* head(const OrderNode& listSentinel);
+	bool isEmpty(const OrderNode& listSentinel);
+	void append(OrderNode& listSentinel, OrderNode* n);
+	void unlink(OrderNode* n);
+}
 
 struct OrdersForTick
 {
@@ -37,59 +67,102 @@ struct OrdersForTick
 
 	// map of order id to its idx in the orders vec for fast lookup
 
-	pc::pmr_array<Order, kOrdersPerTick> orders;
-	std::pmr::unordered_map<size_t, size_t> idToIdx;
+	// linux kernel list_head pattern. Effectively a circular list.
+	// sentinel.prev always points at the tail.
+	// lastElement.next always points to sentinel.
+	// traversing the list in any order will at some point result in the sentinel.
+	OrderNode listSentinel{.order = {}, .next = &listSentinel, .prev = &listSentinel};
+};
 
-	size_t writeIndex = 0;
-	size_t readIndex = 0;
-
-	inline size_t count() { return writeIndex - readIndex; }
-	inline bool is_empty() { return writeIndex == readIndex; }
+struct MessageResponse
+{
+	std::optional<Order> oOrder;
+	enum class Result : uint32_t
+	{
+		Filled,
+		PartiallyFilled,
+		Resting,
+		Rejected,
+		NotFound,
+		Cancelled,
+	} result;
 };
 
 
-constexpr size_t kPriceLevelCount = 128;
-constexpr size_t kFulfilledOrdersCount = 2048;
+constexpr size_t kPriceLevelCount = 128; // MUST be power of 2
+constexpr size_t kFulfilledOrdersCount = 2048; // MUST be power of 2
+constexpr size_t kOrdersPerTick = 8192; // MUST be power of 2
 static_assert(std::has_single_bit(kPriceLevelCount));
 static_assert(std::has_single_bit(kFulfilledOrdersCount));
+static_assert(std::has_single_bit(kOrdersPerTick));
 
 // sizeof the ordersForTick struct + sizeof the orders array
-constexpr size_t ordersSizeInBytes = kPriceLevelCount * sizeof(OrdersForTick) + kPriceLevelCount * kOrdersPerTick * sizeof(Order);
-constexpr size_t fulfilledSizeInBytes = kFulfilledOrdersCount * sizeof(Order::id);
+constexpr size_t totalOrderCount = kPriceLevelCount * kOrdersPerTick;
+constexpr size_t sizeofOrderLevels = kPriceLevelCount * sizeof(OrdersForTick);
+constexpr size_t sizeofOrderNodes = totalOrderCount * sizeof(OrderNode);
+constexpr size_t sizeofFulfilled = kFulfilledOrdersCount * sizeof(MessageResponse);
 
-constexpr size_t orderBookArenaSize = ordersSizeInBytes + fulfilledSizeInBytes;
+constexpr size_t orderBookArenaSize = sizeofOrderLevels + sizeofOrderNodes + sizeofFulfilled + /*// slack for misalignment*/ sizeofFulfilled ;
 
 enum class Instrument : std::size_t
 {
-	Water = 0UL,
-	Food = 1UL,
-	Time = 2UL,
+//	Water = 0UL,
+//	Food = 1UL,
+	Time = 0UL,
 
 	Count
 };
 
-
-enum class OrderType : uint8_t
+struct MessageHeader
 {
-	Buy = 0,
-	Sell = 1,
-	BuyLimit = 2,
-	SellLimit = 3,
-	StopSell,
-	StopSellLimit,
-	StopBuy,
-	StopBuyLimit,
+	uint16_t seqnum;
+	uint32_t numOfMessages;
+	int64_t timestamp_ns;
 };
 
-struct OrderMessage
+enum class RequestType : int32_t
 {
+	NewOrder = 0,
+	CancelOrder = 1
+};
+
+struct OrderRequestHeader
+{
+	uint16_t size;
+	RequestType type;
+};
+
+struct NewOrderRequest
+{
+	MessageID msgId;
 	Order order;
-	Instrument instrumentId;
-	size_t priceTicksLimit;
-	size_t priceTicksStop;
 	OrderType orderType;
+	Instrument instrumentId;
+	uint64_t priceTicksLimit;
+	uint64_t priceTicksStop;
 };
 
+struct CancelOrderRequest
+{
+	MessageID msgId;
+	OrderID toCancel;
+	Instrument instrumentId;
+};
+
+using NewRequest = std::variant<NewOrderRequest, CancelOrderRequest>;
+
+
+struct OrdersData
+{
+	OrdersData(std::pmr::monotonic_buffer_resource& allocator);
+	pc::pmr_array<OrderNode, totalOrderCount> ordersData;
+	OrderNode* GetFree();
+	void ReleaseToFree(OrderNode *freed);
+private:
+	OrderNode* free_list{};
+
+
+};
 
 constexpr size_t invalidBestIdx = SIZE_MAX; // needs to be size_max for underflow logic to work right
 // Order book per instrument
@@ -97,7 +170,7 @@ class OrderBook
 {
 private:
 	// Arena storage
-	std::vector<std::byte> arenaBuffer;
+	HugepageAllocation arenaAlloc;
 	std::pmr::monotonic_buffer_resource arena;
 
 public:
@@ -105,19 +178,26 @@ public:
 
 	size_t filledReadIdx = 0;
 	size_t filledWriteIdx = 0;
-	pc::pmr_array<size_t, kFulfilledOrdersCount> fulfilled; // at most we will have orders per tick fulfilled
+	pc::pmr_array<MessageResponse, kFulfilledOrdersCount> fulfilled; // at most we will have orders per tick fulfilled
 
 	std::array<size_t, 2> bestIdx{invalidBestIdx, invalidBestIdx}; // 0 - ask, 1 - bid.  size::max for unset.
+
 	pc::pmr_array<OrdersForTick, kPriceLevelCount> orders;
+
+	OrdersData ordersData;
+
+	// cancellation helper
+	std::unordered_map<size_t, OrderNode*> idToOrder;
 
 	explicit OrderBook();
 };
 
 
-//int startMatch(std::shared_ptr<dro::SPSCQueue<OrderMessage>> messageQueue);
+//int startMatch(std::shared_ptr<dro::SPSCQueue<NewOrderRequest>> messageQueue);
 int startMatch();
-bool HandleLimitOrder(OrderMessage &ordMsg, OrderBook &symbol);
-
-bool HandleMarketOrder(OrderMessage &ordMsg, OrderBook &symbol, size_t limit);
+[[clang::xray_always_instrument]] MessageResponse HandleLimitOrder(NewOrderRequest&ordMsg, OrderBook &symbol);
+[[clang::xray_always_instrument]] MessageResponse HandleMarketOrder(NewOrderRequest&ordMsg, OrderBook &symbol, size_t limit);
+[[clang::xray_always_instrument]] MessageResponse HandleCancellation(CancelOrderRequest&cancelMsg, OrderBook &symbol);
+[[gnu::noinline]] void matchAllOrders(std::vector<OrderBook>& orderBooks, dro::SPSCQueue<NewRequest>& q, dro::SPSCQueue<MessageResponse>& processedQueue);
 
 }
