@@ -198,6 +198,6 @@ int startMatch();
 [[clang::xray_always_instrument]] MessageResponse HandleLimitOrder(NewOrderRequest&ordMsg, OrderBook &symbol);
 [[clang::xray_always_instrument]] MessageResponse HandleMarketOrder(NewOrderRequest&ordMsg, OrderBook &symbol, size_t limit);
 [[clang::xray_always_instrument]] MessageResponse HandleCancellation(CancelOrderRequest&cancelMsg, OrderBook &symbol);
-[[gnu::noinline]] void matchAllOrders(std::vector<OrderBook>& orderBooks, dro::SPSCQueue<NewRequest>& q, dro::SPSCQueue<MessageResponse>& processedQueue);
+[[gnu::noinline]] void matchAllOrders(std::vector<OrderBook>& orderBooks, dro::SPSCQueue<NewRequest>& q, dro::SPSCQueue<MessageResponse>& processedQueue, std::vector<std::chrono::nanoseconds>& durations);
 
 }

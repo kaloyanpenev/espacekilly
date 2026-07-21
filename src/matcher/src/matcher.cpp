@@ -1,6 +1,7 @@
 #include <matcher/matcher.h>
 
 #include "perfController.h"
+#include <algorithm>
 #include <fcntl.h>
 #include <list>
 #include <memory_resource>
@@ -307,18 +308,21 @@ int startMatch()
 	//	branches.start();
 	//	branchMisses.start();
 	//	instructions.start();
-
+	std::vector<std::chrono::nanoseconds> durations{};
+	durations.reserve(generatedOrders);
 	const auto start = std::chrono::system_clock::now();
-
-	matchAllOrders(orderBooks, q, responses);
+	matchAllOrders(orderBooks, q, responses, durations);
 
 	//	instructions.stop();
 	//	branches.stop()f
 	//	branchMisses.stop();
 
 	const auto finish = std::chrono::system_clock::now();
-	const size_t elapsed = std::chrono::duration_cast<std::chrono::microseconds>(finish - start).count();
-	std::println("elapsed: {}", elapsed);
+
+	std::ranges::sort(durations);
+	std::println("p99: {}", durations[static_cast<size_t>(0.99 * static_cast<double>(durations.size()))].count());
+
+
 	std::println("elapsed ns per order: {}", static_cast<double>((finish - start).count()) / generatedOrders);
 	std::println("executed_limits: {}, resting_crosses: {}, fully_filled_crosses: {}, resting: {}",
 		g_limitOrders,
@@ -346,11 +350,16 @@ int startMatch()
 
 [[clang::xray_always_instrument]] void matchAllOrders(std::vector<OrderBook>& orderBooks,
 	dro::SPSCQueue<NewRequest>& q,
-	dro::SPSCQueue<MessageResponse>& processedQueue)
+	dro::SPSCQueue<MessageResponse>& processedQueue,
+	std::vector<std::chrono::nanoseconds>& durations
+	)
 {
+
 	NewRequest vOrdMsg{};
 	while (q.try_pop(vOrdMsg))
 	{
+		const auto start = std::chrono::high_resolution_clock::now();
+
 		std::visit(
 			overloaded{[&orderBooks, &processedQueue](NewOrderRequest& ordMsg) -> void
 				{
@@ -394,6 +403,9 @@ int startMatch()
 					(void)processedQueue.try_emplace(std::move(result));
 				}},
 			vOrdMsg);
+		const auto end = std::chrono::high_resolution_clock::now();
+
+		durations.emplace_back(start - end);
 	}
 	g_done.store(true, std::memory_order::relaxed);
 }
