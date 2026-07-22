@@ -3,6 +3,7 @@
 #include "perfController.h"
 #include <algorithm>
 #include <fcntl.h>
+#include <fstream>
 #include <list>
 #include <memory_resource>
 #include <random>
@@ -10,6 +11,7 @@
 #include <thread>
 #include <unistd.h>
 #include <utility>
+#include <x86intrin.h>
 
 namespace
 {
@@ -50,7 +52,7 @@ std::vector<OrderBook> initOrderBooks()
 	return symbols;
 }
 
-constexpr size_t generatedOrders = 1'000'000ul;
+constexpr size_t generatedOrders = 10'000'000ul;
 
 std::atomic<bool> g_done = false;
 
@@ -279,7 +281,7 @@ void CreateMarket(dro::SPSCQueue<NewRequest>& queue)
 			CancelOrderRequest{.msgId = msgId++, .toCancel = orderMsg.order.id, .instrumentId = orderMsg.instrumentId});
 	}
 
-	for (auto& el : SerializeAndDeserialize(orders))
+	for (auto& el : orders)
 	{
 		queue.emplace(std::move(el));
 	}
@@ -308,22 +310,39 @@ int startMatch()
 	//	branches.start();
 	//	branchMisses.start();
 	//	instructions.start();
-	std::vector<std::chrono::nanoseconds> durations{};
+	std::vector<uint64_t> durations{};
 	durations.reserve(generatedOrders);
-	const auto start = std::chrono::system_clock::now();
 	matchAllOrders(orderBooks, q, responses, durations);
 
 	//	instructions.stop();
 	//	branches.stop()f
 	//	branchMisses.stop();
 
-	const auto finish = std::chrono::system_clock::now();
 
 	std::ranges::sort(durations);
-	std::println("p99: {}", durations[static_cast<size_t>(0.99 * static_cast<double>(durations.size()))].count());
+
+	static constexpr std::string_view path = "durations.yaml";
+
+	auto file = std::ofstream(path.data(), std::ios::trunc);
+	if (file.is_open())
+	{
+		for (const auto& dur : durations)
+		{
+//			std::string count = std::to_string(dur.count());
+//			file.write(count.data(), count.size());
+//			file.write("\n", 1);
+//			file.flush();
+			file << (dur / 3) << std::endl;
+
+		}
+	}
+
+	std::println("p99.9: {}", (durations[0.999 * durations.size()] / 3));
+	std::println("p95: {}", (durations[0.95 * durations.size()] / 3)); ///divide by 3 cuz we running at 3ghz
+	std::println("p50: {}", (durations[0.5 * durations.size()] / 3));
+	std::println("max: {}", (durations.back() / 3));
 
 
-	std::println("elapsed ns per order: {}", static_cast<double>((finish - start).count()) / generatedOrders);
 	std::println("executed_limits: {}, resting_crosses: {}, fully_filled_crosses: {}, resting: {}",
 		g_limitOrders,
 		g_crossOrder - g_fullyFilledCrossOrder,
@@ -351,15 +370,15 @@ int startMatch()
 [[clang::xray_always_instrument]] void matchAllOrders(std::vector<OrderBook>& orderBooks,
 	dro::SPSCQueue<NewRequest>& q,
 	dro::SPSCQueue<MessageResponse>& processedQueue,
-	std::vector<std::chrono::nanoseconds>& durations
+	std::vector<uint64_t>& durations
 	)
 {
 
 	NewRequest vOrdMsg{};
 	while (q.try_pop(vOrdMsg))
 	{
-		const auto start = std::chrono::high_resolution_clock::now();
-
+		const auto start = __rdtsc();
+		uint32_t aux{0};
 		std::visit(
 			overloaded{[&orderBooks, &processedQueue](NewOrderRequest& ordMsg) -> void
 				{
@@ -403,9 +422,10 @@ int startMatch()
 					(void)processedQueue.try_emplace(std::move(result));
 				}},
 			vOrdMsg);
-		const auto end = std::chrono::high_resolution_clock::now();
 
-		durations.emplace_back(start - end);
+		const auto end =__rdtscp(&aux);
+
+		durations.emplace_back(end - start);
 	}
 	g_done.store(true, std::memory_order::relaxed);
 }
