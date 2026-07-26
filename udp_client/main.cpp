@@ -37,16 +37,14 @@ void OnRequest(const NewRequest& req, Stats& stats)
 	std::visit(wire::overloaded{[&](const NewOrderRequest& r)
 					{
 						++stats.news;
-						if (stats.news <= 5)
-							std::println("  NEW    id={} lots={} type={} ticks={}",
-								r.order.id, r.order.quantityLots,
-								static_cast<int>(r.orderType), r.priceTicksLimit);
+						std::println("  NEW    id={} lots={} type={} ticks={}",
+							r.order.id, r.order.quantityLots,
+							static_cast<int>(r.orderType), r.priceTicksLimit);
 					},
 				   [&](const CancelOrderRequest& r)
 				   {
 					   ++stats.cancels;
-					   if (stats.cancels <= 5)
-						   std::println("  CANCEL id={} toCancel={}", r.msgId, r.toCancel);
+					   std::println("  CANCEL id={} toCancel={}", r.msgId, r.toCancel);
 				   }},
 		req);
 }

@@ -98,6 +98,7 @@ add_subdirectory(src)
 add_subdirectory(udp_common)
 add_subdirectory(udp_broadcaster)
 add_subdirectory(udp_client)
+add_subdirectory(market_generator)
 
 target_include_directories(${PROJECT_NAME} PRIVATE "include")
 

@@ -63,7 +63,7 @@ namespace dro {
 					std::numeric_limits<std::size_t>::max();
 
 			explicit HeapBuffer(const std::size_t capacity,
-								const Allocator &allocator = Allocator())
+								Allocator &allocator = Allocator())
 			// +1 prevents live lock e.g. reader and writer share 1 slot for size 1
 					: capacity_(capacity + 1), buffer_(allocator) {
 				if (capacity < 1) {
@@ -141,7 +141,7 @@ namespace dro {
 
 	public:
 		explicit SPSCQueue(const std::size_t capacity = 0,
-						   const Allocator &allocator = Allocator())
+						   Allocator &allocator = Allocator())
 				: base_type(capacity, allocator) {
 			reader_.capacityCache_ = base_type::capacity_;
 		}

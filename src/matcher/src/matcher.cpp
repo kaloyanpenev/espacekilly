@@ -57,7 +57,7 @@ constexpr size_t generatedOrders = 10'000'000ul;
 std::atomic<bool> g_done = false;
 
 [[clang::xray_never_instrument]]
-void ProcessResponses(dro::SPSCQueue<MessageResponse>& responses)
+void ProcessResponses(dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> >& responses)
 {
 	while (!g_done.load(std::memory_order::relaxed))
 	{
@@ -92,29 +92,30 @@ std::vector<NewRequest> SerializeAndDeserialize(const std::list<NewRequest>& lis
 		int offset = 0;
 		int messageSize = 0;
 		MessageHeader head{.seqnum = 0,
-			.numOfMessages = 1,
-			.timestamp_ns = std::chrono::steady_clock::now().time_since_epoch().count()};
+		                   .numOfMessages = 1,
+		                   .timestamp_ns = std::chrono::steady_clock::now().time_since_epoch().count()};
 
 		std::memcpy(buf, &head, sizeof(head));
 		offset += sizeof(head);
 		messageSize += offset;
 		std::visit(overloaded{[&buf, &offset](const NewOrderRequest& req)
-					   {
-						   OrderRequestHeader reqHeader{.size = requestByteSize, .type = RequestType::NewOrder};
-						   std::memcpy(buf + offset, &reqHeader, sizeof(reqHeader));
-						   offset += sizeof(reqHeader);
+		                      {
+			                      OrderRequestHeader reqHeader{.size = requestByteSize, .type = RequestType::NewOrder};
+			                      std::memcpy(buf + offset, &reqHeader, sizeof(reqHeader));
+			                      offset += sizeof(reqHeader);
 
-						   std::memcpy(buf + offset, &req, sizeof(req));
-						   offset += sizeof(req);
-					   },
-					   [&buf, &offset](const CancelOrderRequest& req)
-					   {
-						   OrderRequestHeader reqHeader{.size = requestByteSize, .type = RequestType::CancelOrder};
-						   std::memcpy(buf + offset, &reqHeader, sizeof(reqHeader));
-						   offset += sizeof(reqHeader);
-						   std::memcpy(buf + offset, &req, sizeof(req));
-						   offset += sizeof(req);
-					   }},
+			                      std::memcpy(buf + offset, &req, sizeof(req));
+			                      offset += sizeof(req);
+		                      },
+		                      [&buf, &offset](const CancelOrderRequest& req)
+		                      {
+			                      OrderRequestHeader reqHeader{.size = requestByteSize,
+			                                                   .type = RequestType::CancelOrder};
+			                      std::memcpy(buf + offset, &reqHeader, sizeof(reqHeader));
+			                      offset += sizeof(reqHeader);
+			                      std::memcpy(buf + offset, &req, sizeof(req));
+			                      offset += sizeof(req);
+		                      }},
 			el);
 
 		messageSize += sizeof(OrderRequestHeader) + requestByteSize;
@@ -139,7 +140,8 @@ std::vector<NewRequest> SerializeAndDeserialize(const std::list<NewRequest>& lis
 		OrderRequestHeader rdReqHead{};
 
 		bytes = ::read(rfd, &rdReqHead, sizeof(rdReqHead));
-		if (!bytes) throw std::runtime_error("problem");
+		if (!bytes)
+			throw std::runtime_error("problem");
 		assert(rdReqHead.size >= std::max(sizeof(NewOrderRequest), sizeof(CancelOrderRequest)));
 
 		std::variant<NewOrderRequest, CancelOrderRequest> rdNewReq{};
@@ -147,22 +149,24 @@ std::vector<NewRequest> SerializeAndDeserialize(const std::list<NewRequest>& lis
 		switch (rdReqHead.type)
 		{
 		case RequestType::NewOrder:
-			{
-				NewOrderRequest rdOrdReq{};
-				bytes = ::read(rfd, &rdOrdReq, rdReqHead.size);
-				if (!bytes) throw std::runtime_error("problem");
-				rdNewReq = std::move(rdOrdReq);
-				break;
-			}
+		{
+			NewOrderRequest rdOrdReq{};
+			bytes = ::read(rfd, &rdOrdReq, rdReqHead.size);
+			if (!bytes)
+				throw std::runtime_error("problem");
+			rdNewReq = std::move(rdOrdReq);
+			break;
+		}
 		case RequestType::CancelOrder:
-			{
-				CancelOrderRequest rdCancelReq{};
-				bytes = ::read(rfd, &rdCancelReq, rdReqHead.size - sizeof(CancelOrderRequest));
-				if (!bytes) throw std::runtime_error("problem");
-				rdNewReq = std::move(rdCancelReq);
+		{
+			CancelOrderRequest rdCancelReq{};
+			bytes = ::read(rfd, &rdCancelReq, rdReqHead.size - sizeof(CancelOrderRequest));
+			if (!bytes)
+				throw std::runtime_error("problem");
+			rdNewReq = std::move(rdCancelReq);
 
-				break;
-			}
+			break;
+		}
 		}
 
 		requests.emplace_back(std::move(rdNewReq));
@@ -175,7 +179,6 @@ std::vector<NewRequest> SerializeAndDeserialize(const std::list<NewRequest>& lis
 [[clang::xray_never_instrument]]
 void CreateMarket(dro::SPSCQueue<NewRequest>& queue)
 {
-
 	//std::random_device rd;  // a seed source for the random number engine
 	std::mt19937 gen(75); // mersenne_twister_engine seeded with rd()
 
@@ -209,10 +212,10 @@ void CreateMarket(dro::SPSCQueue<NewRequest>& queue)
 		//generated_markets: 49999196, generated_limits: 50000804, generated_bids: 49996144, generated_asks: 50003856
 		//book state: ask: 53, bid: 49
 		orders.emplace_back(NewOrderRequest{.msgId = msgId,
-			.order = {.id = msgId++, .quantityLots = lots},
-			.orderType = ordType,
-			.instrumentId = Instrument::Time,
-			.priceTicksLimit = ordIsLimit * ticks});
+		                                    .order = {.id = msgId++, .quantityLots = lots},
+		                                    .orderType = ordType,
+		                                    .instrumentId = Instrument::Time,
+		                                    .priceTicksLimit = ordIsLimit * ticks});
 	}
 
 	bool skip = false;
@@ -246,13 +249,19 @@ void CreateMarket(dro::SPSCQueue<NewRequest>& queue)
 int startMatch()
 {
 	auto orderBooks = initOrderBooks();
-	size_t capacity = static_cast<size_t>(std::ceil(generatedOrders * 1.65)); // 50% cancels, 15% slack
-	dro::SPSCQueue<NewRequest> q(capacity);
-	dro::SPSCQueue<MessageResponse> responses(capacity);
+	size_t capacity = static_cast<size_t>(std::ceil(generatedOrders * 1.6)); // 50% cancels, 15% slack
+	//dro::SPSCQueue<NewRequest> q(capacity);
+	HugepageAllocation hgpgresponses(capacity * sizeof(MessageResponse));
+	auto allocBuf = std::pmr::monotonic_buffer_resource(hgpgresponses.data(),
+		hgpgresponses.size(),
+		std::pmr::null_memory_resource());
+	std::pmr::polymorphic_allocator<MessageResponse> pmrAlloc(&allocBuf);
+	using outqueue = dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> >;
+	dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> > responses(capacity, pmrAlloc);
 
-	auto makeInput = std::jthread(&CreateMarket, std::ref(q));
-	makeInput.join();
-
+	//auto makeInput = std::jthread(&CreateMarket, std::ref(q));
+	//makeInput.join();
+	//
 	auto processResponses = std::jthread(&ProcessResponses, std::ref(responses));
 
 	//CreateMarket(q);
@@ -268,34 +277,33 @@ int startMatch()
 	//	instructions.start();
 	std::vector<uint64_t> durations{};
 	durations.reserve(generatedOrders);
-	matchAllOrders(orderBooks, q, responses, durations);
+	matchAllOrders(orderBooks, responses, durations);
 
 	//	instructions.stop();
 	//	branches.stop()f
 	//	branchMisses.stop();
 
-
 	std::ranges::sort(durations);
 
-//	static constexpr std::string_view path = "durations.yaml";
-//
-//	auto file = std::ofstream(path.data(), std::ios::trunc);
-//	if (file.is_open())
-//	{
-//		for (const auto& dur : durations)
-//		{
-////			std::string count = std::to_string(dur.count());
-////			file.write(count.data(), count.size());
-////			file.write("\n", 1);
-////			file.flush();
-//			file << (dur / 3) << std::endl;
-//
-//		}
-//	}
+	//	static constexpr std::string_view path = "durations.yaml";
+	//
+	//	auto file = std::ofstream(path.data(), std::ios::trunc);
+	//	if (file.is_open())
+	//	{
+	//		for (const auto& dur : durations)
+	//		{
+	////			std::string count = std::to_string(dur.count());
+	////			file.write(count.data(), count.size());
+	////			file.write("\n", 1);
+	////			file.flush();
+	//			file << (dur / 3) << std::endl;
+	//
+	//		}
+	//	}
 
-	size_t idx99999= static_cast<size_t>(0.99999 * durations.size());
-	size_t idx9999= static_cast<size_t>(0.9999 * durations.size());
-	size_t idx999= static_cast<size_t>(0.999 * durations.size());
+	size_t idx99999 = static_cast<size_t>(0.99999 * durations.size());
+	size_t idx9999 = static_cast<size_t>(0.9999 * durations.size());
+	size_t idx999 = static_cast<size_t>(0.999 * durations.size());
 	size_t idx99 = static_cast<size_t>(0.99 * durations.size());
 	size_t idx95 = static_cast<size_t>(0.95 * durations.size());
 	size_t idx50 = static_cast<size_t>(0.5 * durations.size());
@@ -307,7 +315,6 @@ int startMatch()
 	std::println("p95, idx {}: {}", idx95, (durations[idx95] / 3));
 	std::println("p50, idx {}: {}", idx50, (durations[idx50] / 3));
 	std::println("last: {}", (durations.back() / 3));
-
 
 	std::println("executed_limits: {}, resting_crosses: {}, fully_filled_crosses: {}, resting: {}",
 		g_limitOrders,
@@ -334,8 +341,7 @@ int startMatch()
 }
 
 [[clang::xray_always_instrument]] void matchAllOrders(std::vector<OrderBook>& orderBooks,
-	dro::SPSCQueue<NewRequest>& q,
-	dro::SPSCQueue<MessageResponse>& processedQueue,
+	dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> >& processedQueue,
 	std::vector<uint64_t>& durations
 	)
 {
@@ -348,50 +354,53 @@ int startMatch()
 		uint32_t aux{0};
 		std::visit(
 			overloaded{[&orderBooks, &processedQueue](NewOrderRequest& ordMsg) -> void
-				{
-					if (ordMsg.order.quantityLots == 0) [[unlikely]]
-					{
-						(void)processedQueue.try_emplace(
-							MessageResponse{.oOrder = std::nullopt, .result = MessageResponse::Result::Rejected});
-						return;
-					}
-					auto& symbol = orderBooks[static_cast<size_t>(ordMsg.instrumentId)];
+			           {
+				           if (ordMsg.order.quantityLots == 0) [[unlikely]]
+				           {
+					           (void)processedQueue.try_emplace(
+						           MessageResponse{.oOrder = std::nullopt,
+						                           .result = MessageResponse::Result::Rejected});
+					           return;
+				           }
+				           auto& symbol = orderBooks[static_cast<size_t>(ordMsg.instrumentId)];
 
-					// TODO: use look-up table for functions instead of branching - we expect >75% mispredict
+				           // TODO: use look-up table for functions instead of branching - we expect >75% mispredict
 
-					MessageResponse response{};
-					// market - we are simply filling it immediately starting with the best bid/ask. If unable to fully fill, reject.
-					if (ordMsg.orderType == OrderType::Buy || ordMsg.orderType == OrderType::Sell)
-					{
-						//std::println("market order. Id: {}, quantity: {}, price: {}", ordMsg.order.id, ordMsg.order.quantityLots, ordMsg.priceTicksLimit);
-						response = HandleMarketOrder(ordMsg, symbol, ordMsg.orderType == OrderType::Buy ? SIZE_MAX : 0);
-					}
-					// limit order - may rest immediately or get partially filled, or fully filled
-					else if (ordMsg.orderType == OrderType::BuyLimit || ordMsg.orderType == OrderType::SellLimit)
-					{
-						//std::println("limit order. Id: {}, quantity: {}, price: {}", ordMsg.order.id, ordMsg.order.quantityLots, ordMsg.priceTicksLimit);
-						response = HandleLimitOrder(ordMsg, symbol);
-					}
+				           MessageResponse response{};
+				           // market - we are simply filling it immediately starting with the best bid/ask. If unable to fully fill, reject.
+				           if (ordMsg.orderType == OrderType::Buy || ordMsg.orderType == OrderType::Sell)
+				           {
+					           //std::println("market order. Id: {}, quantity: {}, price: {}", ordMsg.order.id, ordMsg.order.quantityLots, ordMsg.priceTicksLimit);
+					           response = HandleMarketOrder(ordMsg,
+						           symbol,
+						           ordMsg.orderType == OrderType::Buy ? SIZE_MAX : 0);
+				           }
+				           // limit order - may rest immediately or get partially filled, or fully filled
+				           else if (ordMsg.orderType == OrderType::BuyLimit || ordMsg.orderType == OrderType::SellLimit)
+				           {
+					           //std::println("limit order. Id: {}, quantity: {}, price: {}", ordMsg.order.id, ordMsg.order.quantityLots, ordMsg.priceTicksLimit);
+					           response = HandleLimitOrder(ordMsg, symbol);
+				           }
 
-					while (symbol.filledWriteIdx != symbol.filledReadIdx)
-					{
-						(void)processedQueue.try_emplace(
-							symbol.fulfilled[symbol.filledReadIdx & (symbol.fulfilled.size() - 1)]);
-						symbol.filledReadIdx++;
-					}
+				           while (symbol.filledWriteIdx != symbol.filledReadIdx)
+				           {
+					           (void)processedQueue.try_emplace(
+						           symbol.fulfilled[symbol.filledReadIdx & (symbol.fulfilled.size() - 1)]);
+					           symbol.filledReadIdx++;
+				           }
 
-					(void)processedQueue.try_emplace(std::move(response));
-				},
-				[&orderBooks, &processedQueue](CancelOrderRequest& cancelMsg) -> void
-				{
-					auto& symbol = orderBooks[static_cast<size_t>(cancelMsg.instrumentId)];
-					MessageResponse result = HandleCancellation(cancelMsg, symbol);
-					(void)processedQueue.try_emplace(std::move(result));
-				}},
+				           (void)processedQueue.try_emplace(std::move(response));
+			           },
+			           [&orderBooks, &processedQueue](CancelOrderRequest& cancelMsg) -> void
+			           {
+				           auto& symbol = orderBooks[static_cast<size_t>(cancelMsg.instrumentId)];
+				           MessageResponse result = HandleCancellation(cancelMsg, symbol);
+				           (void)processedQueue.try_emplace(std::move(result));
+			           }},
 			vOrdMsg);
 
 		_mm_lfence();
-		const auto end =__rdtscp(&aux);
+		const auto end = __rdtscp(&aux);
 
 		durations.emplace_back(end - start);
 	}
@@ -527,7 +536,7 @@ int startMatch()
 
 	// check if this is the new best price - update best idx to be that price level.
 	if (bestSameIdx == invalidBestIdx || (orderIsBuy && ordMsg.priceTicksLimit > bestSameIdx)
-		|| (!orderIsBuy && ordMsg.priceTicksLimit < bestSameIdx))
+	    || (!orderIsBuy && ordMsg.priceTicksLimit < bestSameIdx))
 	{
 		bestSameIdx = ordMsg.priceTicksLimit;
 	}
@@ -550,7 +559,9 @@ MessageResponse HandleCancellation(CancelOrderRequest& cancelMsg, OrderBook& sym
 	return {.oOrder = std::nullopt, .result = MessageResponse::Result::NotFound};
 }
 
-OrdersForTick::OrdersForTick(std::pmr::monotonic_buffer_resource& allocator) {}
+OrdersForTick::OrdersForTick(std::pmr::monotonic_buffer_resource& allocator)
+{
+}
 
 // list ops
 bool intrusiveList::isValidNode(const OrderNode& listSentinel, OrderNode* n)
@@ -587,7 +598,8 @@ void intrusiveList::unlink(OrderNode* n)
 	n->next->prev = n->prev;
 }
 
-OrdersData::OrdersData(std::pmr::monotonic_buffer_resource& allocator) : ordersData(allocator)
+OrdersData::OrdersData(std::pmr::monotonic_buffer_resource& allocator) :
+	ordersData(allocator)
 {
 	free_list = &ordersData[0];
 	OrderNode* tail = free_list;
