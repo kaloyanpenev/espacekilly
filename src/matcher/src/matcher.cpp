@@ -43,14 +43,11 @@ OrderBook::OrderBook() :
 	fulfilled(arena),
 	orders{arena, arena},
 	ordersData{arena},
-	idToOrder{std::pmr::unordered_map<size_t, OrderNode*>(std::pmr::polymorphic_allocator<std::pair<size_t, OrderNode*>>(&arena))}
+	idToOrder{std::pmr::polymorphic_allocator<std::pair<size_t, OrderNode*>>(&arena)}
 {
 	idToOrder.reserve(totalOrderCount);
 }
 
-std::array<OrderBook, static_cast<std::size_t>(Instrument::Count)> initOrderBooks()
-{
-}
 
 constexpr size_t generatedOrders = 10'000'000ul;
 
@@ -96,10 +93,14 @@ int startMatch(int marketFd)
 	//	branches.start();
 	//	branchMisses.start();
 	//	instructions.start();
-	std::array<OrderBook, 1> orderBooks{OrderBook{}};
+	HugepageAllocation durs(arrSize * sizeof(uint64_t));
+	auto dursAllocBuf = std::pmr::monotonic_buffer_resource(durs.data(),
+		durs.size(),
+		std::pmr::null_memory_resource());
 
-	std::array<uint64_t, arrSize> durations{};
-	std::ranges::fill(durations, 0);
+	std::array<OrderBook, static_cast<size_t>(Instrument::Count)> orderBooks{OrderBook{}};
+
+	std::pmr::vector<uint64_t> durations(arrSize, 0, std::pmr::polymorphic_allocator<uint64_t>(&dursAllocBuf));
 
 
 	matchAllOrders(orderBooks, responses, durations, marketFd);
@@ -167,18 +168,10 @@ int startMatch(int marketFd)
 
 [[clang::xray_always_instrument]] void matchAllOrders(std::array<OrderBook,1>& orderBooks,
 	dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> >& processedQueue,
-	std::array<uint64_t, arrSize>& durations,
+	std::pmr::vector<uint64_t>& durations,
 	int marketFd
 	)
 {
-	// PROT_READ: we only replay the stream, so nothing is ever dirtied.
-	// MAP_SHARED, not MAP_PRIVATE: hugetlbfs reserves a second set of pool pages
-	// for a private mapping's potential COW faults even when they cannot happen
-	// at PROT_READ, which would need 2x the pool and fail with ENOMEM.
-	// MAP_POPULATE: the frames already hold the generator's data, but this
-	// process's page tables are empty, so the first touch of each huge page would
-	// take a minor fault. 458 of those inside the timed loop would show up right
-	// where the p99.99+ numbers are read.
 	void* vma = mmap(nullptr, allocSize, PROT_READ, MAP_SHARED | MAP_POPULATE, marketFd, 0);
 	if (vma == MAP_FAILED)
 	{

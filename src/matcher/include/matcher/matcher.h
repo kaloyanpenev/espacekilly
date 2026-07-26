@@ -215,6 +215,6 @@ int startMatch(int marketFd);
 [[clang::xray_always_instrument]] MessageResponse HandleLimitOrder(const NewOrderRequest&ordMsg, OrderBook &symbol);
 [[clang::xray_always_instrument]] MessageResponse HandleMarketOrder(const NewOrderRequest&ordMsg, OrderBook &symbol, size_t limit);
 [[clang::xray_always_instrument]] MessageResponse HandleCancellation(const CancelOrderRequest&cancelMsg, OrderBook &symbol);
-[[gnu::noinline]] void matchAllOrders(std::array<OrderBook, 1>& orderBooks, dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> >& processedQueue, std::array<uint64_t, arrSize>& durations, int marketFd);
+[[gnu::noinline]] void matchAllOrders(std::array<OrderBook, 1>& orderBooks, dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> >& processedQueue, std::pmr::vector<uint64_t>& durations, int marketFd);
 
 }
