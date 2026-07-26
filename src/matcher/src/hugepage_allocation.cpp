@@ -7,7 +7,7 @@
 
 HugepageAllocation::HugepageAllocation(size_t size) : size_(roundUp(size,  kHugePage))
 {
-	data_ = mmap(nullptr, size_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+	data_ = mmap(nullptr, size_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_LOCKED | MAP_POPULATE, -1, 0);
 
 	if (data_ == MAP_FAILED)
 	{

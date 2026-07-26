@@ -40,6 +40,12 @@ else()
   set(CMAKE_CXX_FLAGS_RELEASEO3 "-O3 -DNDEBUG" CACHE STRING "ReleaseO3 compiler flags" FORCE)
 endif()
 
+# Boost (header-only components, e.g. boost::unordered_flat_map)
+if(POLICY CMP0167)
+  cmake_policy(SET CMP0167 NEW) # use upstream BoostConfig.cmake instead of the removed FindBoost module
+endif()
+find_package(Boost REQUIRED)
+
 # CMake modules
 # Configure build type defaults and define CMake options
 include(cmake/Options.cmake)

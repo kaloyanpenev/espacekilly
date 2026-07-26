@@ -84,7 +84,7 @@ std::list<NewRequest> GenerateOrders(size_t count)
 
 int main(int argc, char** argv)
 {
-	size_t count = (argc > 1) ? std::strtoul(argv[1], nullptr, 10) : 50;
+	size_t count = (argc > 1) ? std::strtoul(argv[1], nullptr, 10) : 10'000'000;
 
 	// SOCK_DGRAM = UDP: connectionless, message-oriented, unreliable.
 	int fd = ::socket(AF_INET, SOCK_DGRAM, 0);

@@ -26,5 +26,7 @@ target_include_directories(${LIBRARY_NAME}
         PRIVATE ${INCLUDE_DIR} # Internally, can use includes directly by name without appending "libExample/"
 )
 
+target_link_libraries(${LIBRARY_NAME} PUBLIC Boost::headers)
+
 # Tests
 add_subdirectory("tests")

@@ -293,15 +293,19 @@ int startMatch()
 //		}
 //	}
 
+	size_t idx99999= static_cast<size_t>(0.99999 * durations.size());
+	size_t idx9999= static_cast<size_t>(0.9999 * durations.size());
 	size_t idx999= static_cast<size_t>(0.999 * durations.size());
 	size_t idx99 = static_cast<size_t>(0.99 * durations.size());
 	size_t idx95 = static_cast<size_t>(0.95 * durations.size());
 	size_t idx50 = static_cast<size_t>(0.5 * durations.size());
 
+	std::println("p99.999, idx {}: {}", idx99999, (durations[idx99999] / 3));
+	std::println("p99.99, idx {}: {}", idx9999, (durations[idx9999] / 3));
 	std::println("p99.9, idx {}: {}", idx999, (durations[idx999] / 3));
 	std::println("p99, idx {}: {}", idx99, (durations[idx99] / 3));
 	std::println("p95, idx {}: {}", idx95, (durations[idx95] / 3));
-	std::println("p50, idx {}: {}", idx999, (durations[idx50] / 3));
+	std::println("p50, idx {}: {}", idx50, (durations[idx50] / 3));
 	std::println("last: {}", (durations.back() / 3));
 
 
@@ -534,13 +538,13 @@ int startMatch()
 MessageResponse HandleCancellation(CancelOrderRequest& cancelMsg, OrderBook& symbol)
 {
 	g_cancels++;
-	if (auto extracted = symbol.idToOrder.extract(cancelMsg.toCancel); !extracted.empty())
+	if (auto extracted = symbol.idToOrder.find(cancelMsg.toCancel); extracted != symbol.idToOrder.end())
 	{
-		OrderNode* extractedOrd = extracted.mapped();
-		Order order = std::move(extractedOrd->order);
+		Order order = std::move(extracted->second->order);
 		symbol.counts[order.quantityLots > 0]--;
-		intrusiveList::unlink(extractedOrd);
-		symbol.ordersData.ReleaseToFree(extractedOrd);
+		intrusiveList::unlink(extracted->second);
+		symbol.ordersData.ReleaseToFree(extracted->second);
+		symbol.idToOrder.erase(extracted);
 		return MessageResponse{order, MessageResponse::Result::Cancelled};
 	}
 	return {.oOrder = std::nullopt, .result = MessageResponse::Result::NotFound};

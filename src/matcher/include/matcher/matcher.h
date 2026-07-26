@@ -187,7 +187,7 @@ public:
 	OrdersData ordersData;
 
 	// cancellation helper
-	std::flat_unordered_map<size_t, OrderNode*> idToOrder;
+	std::unordered_map<size_t, OrderNode*> idToOrder;
 
 	explicit OrderBook();
 };
