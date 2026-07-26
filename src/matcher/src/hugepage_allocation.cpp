@@ -3,6 +3,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <sys/mman.h>
 
 HugepageAllocation::HugepageAllocation(size_t size) : size_(roundUp(size,  kHugePage))
 {

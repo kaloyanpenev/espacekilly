@@ -66,50 +66,6 @@ void ProcessResponses(dro::SPSCQueue<MessageResponse>& responses)
 		std::this_thread::yield();
 	}
 }
-//enum class Instrument : std::size_t
-//{
-////	Water = 0UL,
-////	Food = 1UL,
-//	Time = 0UL,
-//
-//	Count
-//};
-//
-//struct MessageHeader
-//{
-//	uint16_t seqnum;
-//	uint32_t numOfMessages;
-//	uint64_t timestamp_ns;
-//};
-//
-//enum class RequestType : int32_t
-//{
-//	NewOrder = 0,
-//	CancelOrder = 1
-//};
-//
-//struct OrderRequestHeader
-//{
-//	RequestType type;
-//	uint64_t size;
-//};
-//
-//struct NewOrderRequest
-//{
-//	MessageID msgId;
-//	Order order;
-//	OrderType orderType;
-//	Instrument instrumentId;
-//	uint64_t priceTicksLimit;
-//	uint64_t priceTicksStop;
-//};
-//
-//struct CancelOrderRequest
-//{
-//	MessageID msgId;
-//	OrderID toCancel;
-//	Instrument instrumentId;
-//};
 
 std::vector<NewRequest> SerializeAndDeserialize(const std::list<NewRequest>& list)
 {
@@ -321,26 +277,32 @@ int startMatch()
 
 	std::ranges::sort(durations);
 
-	static constexpr std::string_view path = "durations.yaml";
+//	static constexpr std::string_view path = "durations.yaml";
+//
+//	auto file = std::ofstream(path.data(), std::ios::trunc);
+//	if (file.is_open())
+//	{
+//		for (const auto& dur : durations)
+//		{
+////			std::string count = std::to_string(dur.count());
+////			file.write(count.data(), count.size());
+////			file.write("\n", 1);
+////			file.flush();
+//			file << (dur / 3) << std::endl;
+//
+//		}
+//	}
 
-	auto file = std::ofstream(path.data(), std::ios::trunc);
-	if (file.is_open())
-	{
-		for (const auto& dur : durations)
-		{
-//			std::string count = std::to_string(dur.count());
-//			file.write(count.data(), count.size());
-//			file.write("\n", 1);
-//			file.flush();
-			file << (dur / 3) << std::endl;
+	size_t idx999= static_cast<size_t>(0.999 * durations.size());
+	size_t idx99 = static_cast<size_t>(0.99 * durations.size());
+	size_t idx95 = static_cast<size_t>(0.95 * durations.size());
+	size_t idx50 = static_cast<size_t>(0.5 * durations.size());
 
-		}
-	}
-
-	std::println("p99.9: {}", (durations[0.999 * durations.size()] / 3));
-	std::println("p95: {}", (durations[0.95 * durations.size()] / 3)); ///divide by 3 cuz we running at 3ghz
-	std::println("p50: {}", (durations[0.5 * durations.size()] / 3));
-	std::println("max: {}", (durations.back() / 3));
+	std::println("p99.9, idx {}: {}", idx999, (durations[idx999] / 3));
+	std::println("p99, idx {}: {}", idx99, (durations[idx99] / 3));
+	std::println("p95, idx {}: {}", idx95, (durations[idx95] / 3));
+	std::println("p50, idx {}: {}", idx999, (durations[idx50] / 3));
+	std::println("last: {}", (durations.back() / 3));
 
 
 	std::println("executed_limits: {}, resting_crosses: {}, fully_filled_crosses: {}, resting: {}",
@@ -378,6 +340,7 @@ int startMatch()
 	while (q.try_pop(vOrdMsg))
 	{
 		const auto start = __rdtsc();
+		_mm_lfence();
 		uint32_t aux{0};
 		std::visit(
 			overloaded{[&orderBooks, &processedQueue](NewOrderRequest& ordMsg) -> void
@@ -423,6 +386,7 @@ int startMatch()
 				}},
 			vOrdMsg);
 
+		_mm_lfence();
 		const auto end =__rdtscp(&aux);
 
 		durations.emplace_back(end - start);

@@ -86,6 +86,13 @@ endif()
 # Main target
 add_subdirectory(src)
 
+# IPC learning projects: UDP multicast broadcaster + client. Placed after
+# add_subdirectory(src) so the `matcher` target (their ground-truth header
+# source) already exists.
+add_subdirectory(udp_common)
+add_subdirectory(udp_broadcaster)
+add_subdirectory(udp_client)
+
 target_include_directories(${PROJECT_NAME} PRIVATE "include")
 
 target_link_libraries(${PROJECT_NAME} PRIVATE project_warnings project_sanitizers)

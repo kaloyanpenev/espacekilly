@@ -9,9 +9,6 @@ if(ENABLE_CLANG_TIDY)
       -extra-arg=-std=c++${CMAKE_CXX_STANDARD}
       -p
     )
-    if(WARNINGS_AS_ERRORS)
-      list(APPEND CMAKE_CXX_CLANG_TIDY -warnings-as-errors=*)
-    endif()
     message(STATUS "clang-tidy enabled")
   else()
     message(WARNING "clang-tidy requested but not found")

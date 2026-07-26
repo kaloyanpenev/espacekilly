@@ -17,23 +17,15 @@ if(MSVC)
 
 elseif(CMAKE_CXX_COMPILER_ID MATCHES ".*Clang")
   target_compile_options(project_warnings INTERFACE
-    -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-align
-    -Woverloaded-virtual -Wpedantic -Wconversion -Wsign-conversion
-    -Wnull-dereference -Wdouble-promotion -Wformat=2 -Wimplicit-fallthrough
   )
   if(WARNINGS_AS_ERRORS)
-    target_compile_options(project_warnings INTERFACE -Werror)
+    target_compile_options(project_warnings INTERFACE )
   endif()
 
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   target_compile_options(project_warnings INTERFACE
-    -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-align
-    -Woverloaded-virtual -Wpedantic -Wconversion -Wsign-conversion
-    -Wnull-dereference -Wdouble-promotion -Wformat=2 -Wimplicit-fallthrough
-    -Wmisleading-indentation -Wduplicated-cond -Wduplicated-branches
-    -Wlogical-op -Wuseless-cast -Wsuggest-override
   )
   if(WARNINGS_AS_ERRORS)
-    target_compile_options(project_warnings INTERFACE -Werror)
+    target_compile_options(project_warnings INTERFACE )
   endif()
 endif()

@@ -8,6 +8,7 @@
 #include <sched.h>
 #include <cstdio>
 #include <cstdlib>
+#include <print>
 
 // Pin the calling thread to a single logical CPU.
 // Passing pid 0 means "the thread making this call".
@@ -30,7 +31,7 @@ int main()
 
 	pin_to_cpu(target_cpu);
 
-	std::printf("running on CPU %d\n", sched_getcpu());
+	std::println("running on CPU {}", sched_getcpu());
 
 	matcher::startMatch();
 
