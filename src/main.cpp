@@ -5,7 +5,10 @@
 #define _GNU_SOURCE
 #endif
 
+#include <fcntl.h>
 #include <sched.h>
+#include <unistd.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <print>
@@ -25,15 +28,35 @@ void pin_to_cpu(int cpu)
 	}
 }
 
-int main()
+int main(int argc, char** argv)
 {
+	// market_generator's memfd has no name in any filesystem, so the only handle
+	// on it is a descriptor. It prints the /proc/<pid>/fd/<fd> path to reopen:
+	// that is a procfs symlink to the underlying object, so opening it yields a
+	// fresh descriptor to the same memfd, not a copy of the bytes.
+	// It only resolves while the generator is alive with that descriptor open.
+	if (argc != 2)
+	{
+		std::println(stderr, "usage: {} /proc/<pid>/fd/<fd>   (path printed by market_generator)", argv[0]);
+		return EXIT_FAILURE;
+	}
+
+	int marketFd = ::open(argv[1], O_RDONLY);
+	if (marketFd == -1)
+	{
+		std::perror("open market");
+		return EXIT_FAILURE;
+	}
+
 	constexpr int target_cpu = 8; // isolating cpu8
 
 	pin_to_cpu(target_cpu);
 
 	std::println("running on CPU {}", sched_getcpu());
 
-	matcher::startMatch();
+	matcher::startMatch(marketFd);
+
+	::close(marketFd);
 
 	return 0;
 }

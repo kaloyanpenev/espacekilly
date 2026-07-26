@@ -67,7 +67,7 @@ int main()
 	}
 	NewRequest* orders = static_cast<NewRequest*>(region);
 
-	std::println("attach with: /proc/{}/fd/{}   ({} requests, {} bytes)", getpid(), fd, arrSize, allocSize);
+	std::println("attach with: ./exchange /proc/{}/fd/{}   ({} requests, {} bytes)", getpid(), fd, arrSize, allocSize);
 	(void)std::fflush(stdout); // the reader is a human in another terminal; do not sit in the buffer
 
 	size_t msgId = 1;

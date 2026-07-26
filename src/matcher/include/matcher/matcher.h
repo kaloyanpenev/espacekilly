@@ -102,7 +102,7 @@ constexpr size_t sizeofOrderLevels = kPriceLevelCount * sizeof(OrdersForTick);
 constexpr size_t sizeofOrderNodes = totalOrderCount * sizeof(OrderNode);
 constexpr size_t sizeofFulfilled = kFulfilledOrdersCount * sizeof(MessageResponse);
 
-constexpr size_t orderBookArenaSize = sizeofOrderLevels + sizeofOrderNodes + sizeofFulfilled + /*// slack for misalignment*/ sizeofFulfilled ;
+constexpr size_t orderBookArenaSize = sizeofOrderLevels + sizeofOrderNodes + sizeofFulfilled + /*// slack for misalignment*/ sizeofFulfilled + totalOrderCount * 128;
 constexpr size_t processQueueSize = sizeof(MessageResponse) * totalOrderCount;
 
 enum class Instrument : std::size_t
@@ -201,14 +201,20 @@ public:
 	std::pmr::unordered_map<size_t, OrderNode*> idToOrder;
 
 	explicit OrderBook();
+	OrderBook(const OrderBook&) = delete;
+	OrderBook(OrderBook&&) = delete;
+	OrderBook& operator=(const OrderBook&) = delete;
+	OrderBook& operator=(OrderBook&&) = delete;
 };
 
 
 //int startMatch(std::shared_ptr<dro::SPSCQueue<NewOrderRequest>> messageQueue);
-int startMatch();
-[[clang::xray_always_instrument]] MessageResponse HandleLimitOrder(NewOrderRequest&ordMsg, OrderBook &symbol);
-[[clang::xray_always_instrument]] MessageResponse HandleMarketOrder(NewOrderRequest&ordMsg, OrderBook &symbol, size_t limit);
-[[clang::xray_always_instrument]] MessageResponse HandleCancellation(CancelOrderRequest&cancelMsg, OrderBook &symbol);
-[[gnu::noinline]] void matchAllOrders(std::vector<OrderBook>& orderBooks, dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> >& processedQueue, std::vector<uint64_t>& durations);
+// marketFd: a read-only descriptor for market_generator's memfd, obtained by
+// opening the /proc/<pid>/fd/<fd> path it prints. Ownership stays with the caller.
+int startMatch(int marketFd);
+[[clang::xray_always_instrument]] MessageResponse HandleLimitOrder(const NewOrderRequest&ordMsg, OrderBook &symbol);
+[[clang::xray_always_instrument]] MessageResponse HandleMarketOrder(const NewOrderRequest&ordMsg, OrderBook &symbol, size_t limit);
+[[clang::xray_always_instrument]] MessageResponse HandleCancellation(const CancelOrderRequest&cancelMsg, OrderBook &symbol);
+[[gnu::noinline]] void matchAllOrders(std::array<OrderBook, 1>& orderBooks, dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> >& processedQueue, std::array<uint64_t, arrSize>& durations, int marketFd);
 
 }

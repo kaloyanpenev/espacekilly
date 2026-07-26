@@ -8,6 +8,7 @@
 #include <memory_resource>
 #include <random>
 #include <ranges>
+#include <sys/mman.h>
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -41,15 +42,14 @@ OrderBook::OrderBook() :
 	arena(arenaAlloc.data(), arenaAlloc.size(), std::pmr::null_memory_resource()),
 	fulfilled(arena),
 	orders{arena, arena},
-	ordersData{arena}
+	ordersData{arena},
+	idToOrder{std::pmr::unordered_map<size_t, OrderNode*>(std::pmr::polymorphic_allocator<std::pair<size_t, OrderNode*>>(&arena))}
 {
 	idToOrder.reserve(totalOrderCount);
 }
 
-std::vector<OrderBook> initOrderBooks()
+std::array<OrderBook, static_cast<std::size_t>(Instrument::Count)> initOrderBooks()
 {
-	auto symbols = std::vector<OrderBook>(static_cast<std::size_t>(Instrument::Count));
-	return symbols;
 }
 
 constexpr size_t generatedOrders = 10'000'000ul;
@@ -67,188 +67,9 @@ void ProcessResponses(dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_a
 	}
 }
 
-std::vector<NewRequest> SerializeAndDeserialize(const std::list<NewRequest>& list)
+
+int startMatch(int marketFd)
 {
-	std::vector<NewRequest> requests;
-
-	static constexpr std::string_view path = "marketData.bin";
-
-	int wfd = ::open(path.data(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
-	if (wfd == -1)
-	{
-		std::perror("open for write");
-		return {};
-	}
-
-	std::println("open for wr: {}", path);
-
-	static constexpr uint16_t requestByteSize = std::max(sizeof(NewOrderRequest), sizeof(CancelOrderRequest));
-	for (const auto& el : list)
-	{
-
-		char buf[std::numeric_limits<uint16_t>::max()]{};
-		std::memset(buf, 0, sizeof(buf));
-
-		int offset = 0;
-		int messageSize = 0;
-		MessageHeader head{.seqnum = 0,
-		                   .numOfMessages = 1,
-		                   .timestamp_ns = std::chrono::steady_clock::now().time_since_epoch().count()};
-
-		std::memcpy(buf, &head, sizeof(head));
-		offset += sizeof(head);
-		messageSize += offset;
-		std::visit(overloaded{[&buf, &offset](const NewOrderRequest& req)
-		                      {
-			                      OrderRequestHeader reqHeader{.size = requestByteSize, .type = RequestType::NewOrder};
-			                      std::memcpy(buf + offset, &reqHeader, sizeof(reqHeader));
-			                      offset += sizeof(reqHeader);
-
-			                      std::memcpy(buf + offset, &req, sizeof(req));
-			                      offset += sizeof(req);
-		                      },
-		                      [&buf, &offset](const CancelOrderRequest& req)
-		                      {
-			                      OrderRequestHeader reqHeader{.size = requestByteSize,
-			                                                   .type = RequestType::CancelOrder};
-			                      std::memcpy(buf + offset, &reqHeader, sizeof(reqHeader));
-			                      offset += sizeof(reqHeader);
-			                      std::memcpy(buf + offset, &req, sizeof(req));
-			                      offset += sizeof(req);
-		                      }},
-			el);
-
-		messageSize += sizeof(OrderRequestHeader) + requestByteSize;
-		int64_t written = write(wfd, buf, messageSize);
-	}
-
-	::close(wfd);
-
-	int rfd = ::open(path.data(), O_RDONLY);
-	if (rfd == -1)
-	{
-		std::perror("open for read");
-		return {};
-	}
-
-	std::println("open for rd: {}", path);
-
-	MessageHeader rdHeader{};
-	int bytes = ::read(rfd, &rdHeader, sizeof(rdHeader));
-	while (bytes > 0 && rdHeader.numOfMessages > 0)
-	{
-		OrderRequestHeader rdReqHead{};
-
-		bytes = ::read(rfd, &rdReqHead, sizeof(rdReqHead));
-		if (!bytes)
-			throw std::runtime_error("problem");
-		assert(rdReqHead.size >= std::max(sizeof(NewOrderRequest), sizeof(CancelOrderRequest)));
-
-		std::variant<NewOrderRequest, CancelOrderRequest> rdNewReq{};
-
-		switch (rdReqHead.type)
-		{
-		case RequestType::NewOrder:
-		{
-			NewOrderRequest rdOrdReq{};
-			bytes = ::read(rfd, &rdOrdReq, rdReqHead.size);
-			if (!bytes)
-				throw std::runtime_error("problem");
-			rdNewReq = std::move(rdOrdReq);
-			break;
-		}
-		case RequestType::CancelOrder:
-		{
-			CancelOrderRequest rdCancelReq{};
-			bytes = ::read(rfd, &rdCancelReq, rdReqHead.size - sizeof(CancelOrderRequest));
-			if (!bytes)
-				throw std::runtime_error("problem");
-			rdNewReq = std::move(rdCancelReq);
-
-			break;
-		}
-		}
-
-		requests.emplace_back(std::move(rdNewReq));
-		bytes = ::read(rfd, &rdHeader, sizeof(rdHeader));
-	}
-
-	return requests;
-}
-
-[[clang::xray_never_instrument]]
-void CreateMarket(dro::SPSCQueue<NewRequest>& queue)
-{
-	//std::random_device rd;  // a seed source for the random number engine
-	std::mt19937 gen(75); // mersenne_twister_engine seeded with rd()
-
-	std::list<NewRequest> orders{};
-	size_t msgId = 1;
-
-	std::uniform_int_distribution<int64_t> distribLots(500, 20000);
-	std::uniform_int_distribution<size_t> distribTicks(40, 60);
-	std::uniform_int_distribution<int32_t> distribType(0, 3);
-
-	for (size_t i = 0ul; i < generatedOrders; i++)
-	{
-		// generate random order type
-		int8_t ordTypeNum = static_cast<int8_t>(distribType(gen));
-		OrderType ordType = static_cast<OrderType>(ordTypeNum);
-
-		int64_t sign = (ordTypeNum < 2) ? 1 : -1; // -1 if selling
-		int64_t lots = distribLots(gen) * sign;
-
-		size_t ticks = distribTicks(gen);
-		size_t ordIsLimit = (ordType == OrderType::BuyLimit || ordType == OrderType::SellLimit);
-
-		g_generatedMarkets += !ordIsLimit;
-		g_generatedLimits += ordIsLimit;
-		g_generatedBids += ordTypeNum < 2;
-
-		// elapsed: 2416707
-		//elapsed ns per order: 24.16707869
-		//executed_limits: 50000804, resting_crosses: 6279364, fully_filled_crosses: 9458869, resting: 40541935
-		//executed_markets: 49999196
-		//generated_markets: 49999196, generated_limits: 50000804, generated_bids: 49996144, generated_asks: 50003856
-		//book state: ask: 53, bid: 49
-		orders.emplace_back(NewOrderRequest{.msgId = msgId,
-		                                    .order = {.id = msgId++, .quantityLots = lots},
-		                                    .orderType = ordType,
-		                                    .instrumentId = Instrument::Time,
-		                                    .priceTicksLimit = ordIsLimit * ticks});
-	}
-
-	bool skip = false;
-	std::uniform_int_distribution<int32_t> cancelDistrib(0, 1);
-
-	for (std::list<NewRequest>::iterator itr = orders.begin(); itr != orders.end(); std::advance(itr, 1))
-	{
-		if (std::exchange(skip, false))
-		{
-			continue;
-		}
-
-		bool cancel = static_cast<bool>(cancelDistrib(gen));
-		if (!cancel)
-		{
-			continue;
-		}
-		skip = true; // we can't cancel a cancellation, so skip the next one.
-
-		NewOrderRequest& orderMsg = std::get<NewOrderRequest>(*itr);
-		orders.emplace(std::next(itr, 1),
-			CancelOrderRequest{.msgId = msgId++, .toCancel = orderMsg.order.id, .instrumentId = orderMsg.instrumentId});
-	}
-
-	for (auto& el : orders)
-	{
-		queue.emplace(std::move(el));
-	}
-}
-
-int startMatch()
-{
-	auto orderBooks = initOrderBooks();
 	size_t capacity = static_cast<size_t>(std::ceil(generatedOrders * 1.6)); // 50% cancels, 15% slack
 	//dro::SPSCQueue<NewRequest> q(capacity);
 	HugepageAllocation hgpgresponses(capacity * sizeof(MessageResponse));
@@ -262,7 +83,7 @@ int startMatch()
 	//auto makeInput = std::jthread(&CreateMarket, std::ref(q));
 	//makeInput.join();
 	//
-	auto processResponses = std::jthread(&ProcessResponses, std::ref(responses));
+	//auto processResponses = std::jthread(&ProcessResponses, std::ref(responses));
 
 	//CreateMarket(q);
 	//makeInput.join();
@@ -275,9 +96,13 @@ int startMatch()
 	//	branches.start();
 	//	branchMisses.start();
 	//	instructions.start();
-	std::vector<uint64_t> durations{};
-	durations.reserve(generatedOrders);
-	matchAllOrders(orderBooks, responses, durations);
+	std::array<OrderBook, 1> orderBooks{OrderBook{}};
+
+	std::array<uint64_t, arrSize> durations{};
+	std::ranges::fill(durations, 0);
+
+
+	matchAllOrders(orderBooks, responses, durations, marketFd);
 
 	//	instructions.stop();
 	//	branches.stop()f
@@ -308,12 +133,12 @@ int startMatch()
 	size_t idx95 = static_cast<size_t>(0.95 * durations.size());
 	size_t idx50 = static_cast<size_t>(0.5 * durations.size());
 
-	std::println("p99.999, idx {}: {}", idx99999, (durations[idx99999] / 3));
-	std::println("p99.99, idx {}: {}", idx9999, (durations[idx9999] / 3));
-	std::println("p99.9, idx {}: {}", idx999, (durations[idx999] / 3));
-	std::println("p99, idx {}: {}", idx99, (durations[idx99] / 3));
-	std::println("p95, idx {}: {}", idx95, (durations[idx95] / 3));
-	std::println("p50, idx {}: {}", idx50, (durations[idx50] / 3));
+	std::println("p99.999, idx {}: {:.0f}", idx99999, (durations[idx99999] / 2.8945));
+	std::println("p99.99, idx {}: {:.0f}", idx9999, (durations[idx9999] / 2.8945));
+	std::println("p99.9, idx {}: {:.0f}", idx999, (durations[idx999] / 2.8945));
+	std::println("p99, idx {}: {:.0f}", idx99, (durations[idx99] / 2.8945));
+	std::println("p95, idx {}: {:.0f}", idx95, (durations[idx95] / 2.8945));
+	std::println("p50, idx {}: {:.0f}", idx50, (durations[idx50] / 2.8945));
 	std::println("last: {}", (durations.back() / 3));
 
 	std::println("executed_limits: {}, resting_crosses: {}, fully_filled_crosses: {}, resting: {}",
@@ -336,18 +161,35 @@ int startMatch()
 	//	std::println("branch misses : {}", branchMisses.read());
 	//	std::println("miss rate     : {}",
 	//		   branchMisses.read() / branches.read());
-	processResponses.join();
+	//processResponses.join();
 	return 0;
 }
 
-[[clang::xray_always_instrument]] void matchAllOrders(std::vector<OrderBook>& orderBooks,
+[[clang::xray_always_instrument]] void matchAllOrders(std::array<OrderBook,1>& orderBooks,
 	dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> >& processedQueue,
-	std::vector<uint64_t>& durations
+	std::array<uint64_t, arrSize>& durations,
+	int marketFd
 	)
 {
+	// PROT_READ: we only replay the stream, so nothing is ever dirtied.
+	// MAP_SHARED, not MAP_PRIVATE: hugetlbfs reserves a second set of pool pages
+	// for a private mapping's potential COW faults even when they cannot happen
+	// at PROT_READ, which would need 2x the pool and fail with ENOMEM.
+	// MAP_POPULATE: the frames already hold the generator's data, but this
+	// process's page tables are empty, so the first touch of each huge page would
+	// take a minor fault. 458 of those inside the timed loop would show up right
+	// where the p99.99+ numbers are read.
+	void* vma = mmap(nullptr, allocSize, PROT_READ, MAP_SHARED | MAP_POPULATE, marketFd, 0);
+	if (vma == MAP_FAILED)
+	{
+		std::perror("mmap market");
+		return;
+	}
 
-	NewRequest vOrdMsg{};
-	while (q.try_pop(vOrdMsg))
+	NewRequest* orders = static_cast<NewRequest*>(vma);
+
+
+	for (size_t i = 0; i < arrSize; i++)
 	{
 		const auto start = __rdtsc();
 		_mm_lfence();
@@ -397,24 +239,26 @@ int startMatch()
 				           MessageResponse result = HandleCancellation(cancelMsg, symbol);
 				           (void)processedQueue.try_emplace(std::move(result));
 			           }},
-			vOrdMsg);
+			orders[i]);
 
 		_mm_lfence();
 		const auto end = __rdtscp(&aux);
 
-		durations.emplace_back(end - start);
+		durations[i] = (end - start);
 	}
 	g_done.store(true, std::memory_order::relaxed);
+
+	munmap(vma, allocSize);
 }
 
-[[clang::xray_always_instrument]] MessageResponse HandleMarketOrder(NewOrderRequest& ordMsg,
+[[clang::xray_always_instrument]] MessageResponse HandleMarketOrder(const NewOrderRequest& ordMsg,
 	OrderBook& symbol,
 	size_t limit)
 {
 	g_marketOrders++;
 	bool orderIsBuy = ordMsg.order.quantityLots > 0; // 1 for buy, 0 for sell
 	size_t& bestIdx = symbol.bestIdx[!orderIsBuy];   // looking for best bid when order type is sell and vv.
-	int64_t initialQuantity = ordMsg.order.quantityLots;
+	int64_t newLots = ordMsg.order.quantityLots;
 
 	// 1 if order is buy - price moves up to next more expensive ask after you fill current level
 	//-1 if order is sell - price moves down to next cheaper bid after you fill current level
@@ -425,7 +269,7 @@ int startMatch()
 	// in that case, direction is 1 -> if we go under 0, it means  we are overfilled: end
 	// quantityLots is negative if the order is a sell.
 	// if we go above 0, it means we are overfilled: end -> direction is -1 so we flip it
-	while (orderCount > 0 && bestIdx != invalidBestIdx && ordMsg.order.quantityLots * direction > 0)
+	while (orderCount > 0 && bestIdx != invalidBestIdx && newLots * direction > 0)
 	{
 		auto& currTickOrders = symbol.orders[bestIdx & (symbol.orders.size() - 1)];
 		if (intrusiveList::isEmpty(currTickOrders.listSentinel))
@@ -444,14 +288,14 @@ int startMatch()
 		}
 
 		OrderNode* resting = intrusiveList::head(currTickOrders.listSentinel);
-		ordMsg.order.quantityLots += resting->order.quantityLots; // fill towards zero
+		newLots += resting->order.quantityLots; // fill towards zero
 
 		// remainder is left in the resting if we crossed over the 0 in the dir we are going.
-		const bool remainderLeftInResting = ordMsg.order.quantityLots * direction < 0;
+		const bool remainderLeftInResting = newLots * direction < 0;
 
 		// if we filled the incoming - existing could be partially fulfilled now, so give back what we took.
 		// keep the remainder if there is any left (there will be, if we overfilled the incoming order).
-		resting->order.quantityLots = remainderLeftInResting * ordMsg.order.quantityLots;
+		resting->order.quantityLots = remainderLeftInResting * newLots;
 
 		// side-effects
 		symbol.fulfilled[symbol.filledWriteIdx & (symbol.fulfilled.size() - 1)] = MessageResponse{resting->order,
@@ -473,17 +317,17 @@ int startMatch()
 		bestIdx = invalidBestIdx;
 	}
 
-	bool unfilled = ordMsg.order.quantityLots * direction > 0;
-	bool rejected = ordMsg.order.quantityLots == initialQuantity;
+	bool unfilled = newLots * direction > 0;
+	bool rejected = newLots == ordMsg.order.quantityLots;
 	// if the order is filled, there will be a remainder inside (equal to the leftover in the resting limit order it filled against)
-	ordMsg.order.quantityLots *= unfilled;
+	newLots *= unfilled;
 
 	constexpr static std::array<MessageResponse::Result, 3> resArray{
 		MessageResponse::Result::Filled, MessageResponse::Result::PartiallyFilled, MessageResponse::Result::Rejected};
-	return MessageResponse{.oOrder = ordMsg.order, .result = resArray[unfilled + rejected]};
+	return MessageResponse{.oOrder = Order{ordMsg.order.id, newLots}, .result = resArray[unfilled + rejected]};
 }
 
-[[clang::xray_always_instrument]] MessageResponse HandleLimitOrder(NewOrderRequest& ordMsg, OrderBook& symbol)
+[[clang::xray_always_instrument]] MessageResponse HandleLimitOrder(const NewOrderRequest& ordMsg, OrderBook& symbol)
 {
 
 	g_limitOrders++;
@@ -491,6 +335,7 @@ int startMatch()
 
 	const size_t& bestOppositeIdx = symbol.bestIdx[!orderIsBuy]; // looking for best bid when order type is sell and vv.
 
+	Order newOrder = ordMsg.order;
 	// 1) match - if the incoming crosses over the other type's best idx
 	// then fill it, starting with the best idx level. any remainder, leave in that level.
 
@@ -506,9 +351,10 @@ int startMatch()
 			if (response.result == MessageResponse::Result::Filled)
 			{
 				g_fullyFilledCrossOrder++;
-				assert(ordMsg.order.quantityLots == 0);
+				assert(response.oOrder->quantityLots == 0);
 				return response;
 			}
+			newOrder = *response.oOrder;
 		}
 	}
 
@@ -529,8 +375,8 @@ int startMatch()
 	OrderNode* incOrder = symbol.ordersData.GetFree();
 	intrusiveList::append(currOrdersLevel.listSentinel, incOrder);
 
-	incOrder->order = ordMsg.order;
-	symbol.idToOrder[ordMsg.order.id] = incOrder;
+	incOrder->order = newOrder;
+	symbol.idToOrder[newOrder.id] = incOrder;
 
 	symbol.counts[orderIsBuy]++;
 
@@ -541,10 +387,10 @@ int startMatch()
 		bestSameIdx = ordMsg.priceTicksLimit;
 	}
 
-	return MessageResponse{.oOrder = std::move(ordMsg.order), .result = MessageResponse::Result::Resting};
+	return MessageResponse{.oOrder = std::move(newOrder), .result = MessageResponse::Result::Resting};
 }
 
-MessageResponse HandleCancellation(CancelOrderRequest& cancelMsg, OrderBook& symbol)
+MessageResponse HandleCancellation(const CancelOrderRequest& cancelMsg, OrderBook& symbol)
 {
 	g_cancels++;
 	if (auto extracted = symbol.idToOrder.find(cancelMsg.toCancel); extracted != symbol.idToOrder.end())
