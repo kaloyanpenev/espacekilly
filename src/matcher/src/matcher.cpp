@@ -108,6 +108,11 @@ int startMatch(int marketFd)
 	//	instructions.stop();
 	//	branches.stop()f
 	//	branchMisses.stop();
+	auto worst = std::ranges::max_element(durations);
+	// remove first 100 elements - cold caches / branching, etc.
+	durations.erase(durations.begin(), std::next(durations.begin(), 100));
+
+	std::println("worst idx: {}", std::distance(durations.begin(), worst));
 
 	std::ranges::sort(durations);
 
