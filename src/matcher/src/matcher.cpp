@@ -100,7 +100,7 @@ int startMatch(int marketFd)
 
 	std::array<OrderBook, static_cast<size_t>(Instrument::Count)> orderBooks{OrderBook{}};
 
-	std::pmr::vector<uint64_t> durations(arrSize, 0, std::pmr::polymorphic_allocator<uint64_t>(&dursAllocBuf));
+	std::pmr::vector<uint64_t> durations(arrSize / 1000, 0, std::pmr::polymorphic_allocator<uint64_t>(&dursAllocBuf));
 
 
 	matchAllOrders(orderBooks, responses, durations, marketFd);
@@ -108,11 +108,11 @@ int startMatch(int marketFd)
 	//	instructions.stop();
 	//	branches.stop()f
 	//	branchMisses.stop();
-	auto worst = std::ranges::max_element(durations);
+	// auto worst = std::ranges::max_element(durations);
 	// remove first 100 elements - cold caches / branching, etc.
 	durations.erase(durations.begin(), std::next(durations.begin(), 100));
 
-	std::println("worst idx: {}", std::distance(durations.begin(), worst));
+	//std::println("worst idx: {}", std::distance(durations.begin(), worst));
 
 	std::ranges::sort(durations);
 
@@ -145,7 +145,7 @@ int startMatch(int marketFd)
 	std::println("p99, idx {}: {:.0f}", idx99, (durations[idx99] / 2.8945));
 	std::println("p95, idx {}: {:.0f}", idx95, (durations[idx95] / 2.8945));
 	std::println("p50, idx {}: {:.0f}", idx50, (durations[idx50] / 2.8945));
-	std::println("last: {}", (durations.back() / 3));
+	std::println("last: {:.0f}", (durations.back() / 2.8945));
 
 	std::println("executed_limits: {}, resting_crosses: {}, fully_filled_crosses: {}, resting: {}",
 		g_limitOrders,
@@ -189,8 +189,13 @@ int startMatch(int marketFd)
 
 	for (size_t i = 0; i < arrSize; i++)
 	{
-		const auto start = __rdtsc();
-		_mm_lfence();
+		size_t start{0};
+		if (i % 1000 == 0)
+		{
+			_mm_lfence();
+			 start = __rdtsc();
+		}
+
 		uint32_t aux{0};
 		std::visit(
 			overloaded{[&orderBooks, &processedQueue](NewOrderRequest& ordMsg) -> void
@@ -239,10 +244,13 @@ int startMatch(int marketFd)
 			           }},
 			orders[i]);
 
-		_mm_lfence();
-		const auto end = __rdtscp(&aux);
+		if (i % 1000 == 0)
+		{
+			const auto end = __rdtscp(&aux);
+			_mm_lfence();
 
-		durations[i] = (end - start);
+			durations[i / 1000] = (end - start);
+		}
 	}
 	g_done.store(true, std::memory_order::relaxed);
 
