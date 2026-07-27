@@ -45,7 +45,7 @@ OrderBook::OrderBook() :
 	ordersData{arena},
 	idToOrder{std::pmr::polymorphic_allocator<std::pair<size_t, OrderNode*>>(&arena)}
 {
-	idToOrder.reserve(totalOrderCount);
+	idToOrder.reserve(totalOrderCount / 2);
 }
 
 
@@ -100,7 +100,7 @@ int startMatch(int marketFd)
 
 	std::array<OrderBook, static_cast<size_t>(Instrument::Count)> orderBooks{OrderBook{}};
 
-	std::pmr::vector<uint64_t> durations(arrSize / 1000, 0, std::pmr::polymorphic_allocator<uint64_t>(&dursAllocBuf));
+	std::pmr::vector<uint64_t> durations(arrSize, 0, std::pmr::polymorphic_allocator<uint64_t>(&dursAllocBuf));
 
 
 	matchAllOrders(orderBooks, responses, durations, marketFd);
@@ -139,13 +139,14 @@ int startMatch(int marketFd)
 	size_t idx95 = static_cast<size_t>(0.95 * durations.size());
 	size_t idx50 = static_cast<size_t>(0.5 * durations.size());
 
-	std::println("p99.999, idx {}: {:.0f}", idx99999, (durations[idx99999] / 2.8945));
-	std::println("p99.99, idx {}: {:.0f}", idx9999, (durations[idx9999] / 2.8945));
-	std::println("p99.9, idx {}: {:.0f}", idx999, (durations[idx999] / 2.8945));
-	std::println("p99, idx {}: {:.0f}", idx99, (durations[idx99] / 2.8945));
-	std::println("p95, idx {}: {:.0f}", idx95, (durations[idx95] / 2.8945));
-	std::println("p50, idx {}: {:.0f}", idx50, (durations[idx50] / 2.8945));
-	std::println("last: {:.0f}", (durations.back() / 2.8945));
+	//rdtsc - 58 cycles
+	std::println("p99.999, idx {}: {:.0f}ns", idx99999, ((durations[idx99999] - 58) / 2.8945));
+	std::println("p99.99, idx {}: {:.0f}ns", idx9999, ((durations[idx9999] - 58) / 2.8945));
+	std::println("p99.9, idx {}: {:.0f}ns", idx999, ((durations[idx999] - 58) / 2.8945));
+	std::println("p99, idx {}: {:.0f}ns", idx99, ((durations[idx99] - 58) / 2.8945));
+	std::println("p95, idx {}: {:.0f}ns", idx95, ((durations[idx95] - 58) / 2.8945));
+	std::println("p50, idx {}: {:.0f}ns", idx50, ((durations[idx50] - 58) / 2.8945));
+	std::println("last: {:.0f}ns", ((durations.back() - 58) / 2.8945));
 
 	std::println("executed_limits: {}, resting_crosses: {}, fully_filled_crosses: {}, resting: {}",
 		g_limitOrders,
@@ -190,11 +191,8 @@ int startMatch(int marketFd)
 	for (size_t i = 0; i < arrSize; i++)
 	{
 		size_t start{0};
-		if (i % 1000 == 0)
-		{
-			_mm_lfence();
-			 start = __rdtsc();
-		}
+		_mm_lfence();
+		start = __rdtsc();
 
 		uint32_t aux{0};
 		std::visit(
@@ -244,13 +242,9 @@ int startMatch(int marketFd)
 			           }},
 			orders[i]);
 
-		if (i % 1000 == 0)
-		{
 			const auto end = __rdtscp(&aux);
 			_mm_lfence();
-
-			durations[i / 1000] = (end - start);
-		}
+			durations[i] = (end - start);
 	}
 	g_done.store(true, std::memory_order::relaxed);
 
@@ -399,13 +393,13 @@ int startMatch(int marketFd)
 MessageResponse HandleCancellation(const CancelOrderRequest& cancelMsg, OrderBook& symbol)
 {
 	g_cancels++;
-	if (auto extracted = symbol.idToOrder.find(cancelMsg.toCancel); extracted != symbol.idToOrder.end())
+	if (auto extracted = symbol.idToOrder.extract(cancelMsg.toCancel); !extracted.empty())
 	{
-		Order order = std::move(extracted->second->order);
+		OrderNode* extractedOrd = extracted.mapped();
+		Order order = std::move(extractedOrd->order);
 		symbol.counts[order.quantityLots > 0]--;
-		intrusiveList::unlink(extracted->second);
-		symbol.ordersData.ReleaseToFree(extracted->second);
-		symbol.idToOrder.erase(extracted);
+		intrusiveList::unlink(extractedOrd);
+		symbol.ordersData.ReleaseToFree(extractedOrd);
 		return MessageResponse{order, MessageResponse::Result::Cancelled};
 	}
 	return {.oOrder = std::nullopt, .result = MessageResponse::Result::NotFound};
