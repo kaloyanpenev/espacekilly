@@ -1,23 +1,35 @@
 
 Sandbox for playing with cache, branches, allocation, and data structures.
 
+Effectively all of the interesting bits are in matcher.h and matcher.cpp.
+
 ### Numbers
 
-Non-representative of a real workload because it's all synthetic data but the ratio should be right. It's probably less bursty and therefore more cache-favourable than real data.
+Non-representative of a real workload because it's all synthetic data and uses some big hacks!
+Such as cancellation map is really a vector as I have full control over the orderIDs. Another one is that there is no spread movement (price ticks area always within 0-128 range), fulfilled orders are simply left in a buffer, etc. Overall this is more of a sandbox to play with different approaches than a target.
+
+Currently it uses an arena monotonic allocator to allocate all of the state ahead of time and then hot path is all zero-copy and zero-allocation.
+
+The book is an tick-indexed array with each element holding the maximum amount of nodes for a price. Each tick level is modelled as an intrusive linked list. Each level has its own pool of nodes so it does not fragment across all the levels as time goes on.
+
+Overall, these numberse are not representative of anything, but it has been fun to see them move up and down by changing the design.
+
+If you are interested:
 
 Numbers captured on an isolated core locked at 2.9GHz on Ryzen 7 4800H (Zen 2) on Ubuntu 24.04 with g++-14.
 First 100 entries ignored to warm up caches and BTB.
-These numbers look to be real as they are reproducible within 10% across every run with the same seed.
 
 
 ```
-p99.999, idx 14999750: 4649ns
-p99.99, idx 14998400: 2555ns
-p99.9, idx 14984900: 771ns
-p99, idx 14849901: 140ns
-p95, idx 14249905: 50ns
-p50, idx 7499950: 30ns
-last: 7865ns
+15 million orders
+
+p99.999, idx 14999750: 691ns, fills/order: 17
+p99.99, idx 14998400: 421ns, fills/order: 13
+p99.9, idx 14984900: 240ns, fills/order: 12
+p99, idx 14849901: 100ns, fills/order: 6
+p95, idx 14249905: 50ns, fills/order: 1
+p50, idx 7499950: 20ns, fills/order: 0
+last: 2254ns, fills/order: 27
 executed_limits: 7501163, resting_crosses: 10608, fully_filled_crosses: 372370, resting: 7128793
 no ops (aggressive order found the opposite side empty): 2
 executed_markets: 899710
@@ -109,11 +121,11 @@ book ladder (non-empty levels):
        2       11    25      0        0
        1        1    23      0        0
        1        2    22      0        0
-```
+
 
 ### To run
 
-A bit janky as of right now, but first build and run market_generator - it creates the market in shared memory and gives you how to attach from the main exchange. Reason for this is because I wanted to do IPC for this.
+A bit janky as of right now, but first build and run `market_generator` - it creates the market in shared memory and gives you how to attach from the main exchange. Reason for this is because I wanted to do IPC for this.
 
 ```
 $ ./market_generator <seed> 

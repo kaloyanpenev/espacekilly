@@ -31,21 +31,28 @@ struct overloaded : Ts...
 {
 	using Ts::operator()...;
 };
+
+constexpr size_t kOrdersPerTickShift = std::countr_zero(matcher::kOrdersPerTick);
+
+size_t GetPriceLevelForOrder(const matcher::OrderNode* node, const matcher::OrderNode* startNode)
+{
+	return (node - startNode) >> kOrdersPerTickShift;
+}
+
 }
 
 namespace matcher
 {
 
-constexpr size_t generatedOrders = 10'000'000ul;
+
 OrderBook::OrderBook() :
 	arenaAlloc(orderBookArenaSize),
 	arena(arenaAlloc.data(), arenaAlloc.size(), std::pmr::null_memory_resource()),
 	fulfilled(arena),
-	orders{arena, arena},
-	ordersData{arena},
-	idToOrder{std::pmr::polymorphic_allocator<std::pair<size_t, OrderNode*>>(&arena)}
+	orders(arena, arena),
+	ordersData(arena),
+	idToOrder(arena)
 {
-	idToOrder.reserve(generatedOrders * 0.7);
 }
 
 
@@ -66,7 +73,7 @@ void ProcessResponses(dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_a
 
 int startMatch(int marketFd)
 {
-	size_t capacity = static_cast<size_t>(std::ceil(generatedOrders * 1.6)); // 50% cancels, 15% slack
+	size_t capacity = static_cast<size_t>(arrSize * 1.05); // some slack
 	//dro::SPSCQueue<NewRequest> q(capacity);
 	HugepageAllocation hgpgresponses(capacity * sizeof(MessageResponse));
 	auto allocBuf = std::pmr::monotonic_buffer_resource(hgpgresponses.data(),
@@ -92,14 +99,14 @@ int startMatch(int marketFd)
 	//	branches.start();
 	//	branchMisses.start();
 	//	instructions.start();
-	HugepageAllocation durs(arrSize * sizeof(uint64_t));
+	HugepageAllocation durs(arrSize * 2 * sizeof(uint64_t));
 	auto dursAllocBuf = std::pmr::monotonic_buffer_resource(durs.data(),
 		durs.size(),
 		std::pmr::null_memory_resource());
 
 	std::array<OrderBook, static_cast<size_t>(Instrument::Count)> orderBooks{OrderBook{}};
 
-	std::pmr::vector<uint64_t> durations(arrSize, 0, std::pmr::polymorphic_allocator<uint64_t>(&dursAllocBuf));
+	std::pmr::vector<std::pair<uint64_t, uint64_t>> durations(arrSize, {0,0}, std::pmr::polymorphic_allocator<std::pair<uint64_t, uint64_t>>(&dursAllocBuf));
 
 
 	matchAllOrders(orderBooks, responses, durations, marketFd);
@@ -108,6 +115,7 @@ int startMatch(int marketFd)
 	//	branches.stop()f
 	//	branchMisses.stop();
 	// auto worst = std::ranges::max_element(durations);
+	//
 	// remove first 100 elements - cold caches / branching, etc.
 	durations.erase(durations.begin(), std::next(durations.begin(), 100));
 
@@ -141,13 +149,13 @@ int startMatch(int marketFd)
 	// rdtsc
 	constexpr int cyclesForRdtsc = 58;
 	constexpr double cyclesPerNs = 2.8945;
-	std::println("p99.999, idx {}: {:.0f}ns", idx99999, ((durations[idx99999] - cyclesForRdtsc) / cyclesPerNs));
-	std::println("p99.99, idx {}: {:.0f}ns", idx9999, ((durations[idx9999] - cyclesForRdtsc) / cyclesPerNs));
-	std::println("p99.9, idx {}: {:.0f}ns", idx999, ((durations[idx999] - cyclesForRdtsc) / cyclesPerNs));
-	std::println("p99, idx {}: {:.0f}ns", idx99, ((durations[idx99] - cyclesForRdtsc) / cyclesPerNs));
-	std::println("p95, idx {}: {:.0f}ns", idx95, ((durations[idx95] - cyclesForRdtsc) / cyclesPerNs));
-	std::println("p50, idx {}: {:.0f}ns", idx50, ((durations[idx50] - cyclesForRdtsc) / cyclesPerNs));
-	std::println("last: {:.0f}ns", ((durations.back() - 58) / 2.8945));
+	std::println("p99.999, idx {}: {:.0f}ns, fills/order: {}", idx99999, ((durations[idx99999].first - cyclesForRdtsc) / cyclesPerNs), durations[idx99999].second);
+	std::println("p99.99, idx {}: {:.0f}ns, fills/order: {}", idx9999, ((durations[idx9999].first - cyclesForRdtsc) / cyclesPerNs), durations[idx9999].second);
+	std::println("p99.9, idx {}: {:.0f}ns, fills/order: {}", idx999, ((durations[idx999].first - cyclesForRdtsc) / cyclesPerNs),durations[idx999].second);
+	std::println("p99, idx {}: {:.0f}ns, fills/order: {}", idx99, ((durations[idx99].first - cyclesForRdtsc) / cyclesPerNs), durations[idx99].second);
+	std::println("p95, idx {}: {:.0f}ns, fills/order: {}", idx95, ((durations[idx95].first - cyclesForRdtsc) / cyclesPerNs), durations[idx95].second);
+	std::println("p50, idx {}: {:.0f}ns, fills/order: {}", idx50, ((durations[idx50].first - cyclesForRdtsc) / cyclesPerNs), durations[idx50].second);
+	std::println("last: {:.0f}ns, fills/order: {}", ((durations.back().first - cyclesForRdtsc) / cyclesPerNs), durations.back().second);
 
 	std::println("executed_limits: {}, resting_crosses: {}, fully_filled_crosses: {}, resting: {}",
 		g_limitOrders,
@@ -196,7 +204,7 @@ int startMatch(int marketFd)
 
 [[clang::xray_always_instrument]] void matchAllOrders(std::array<OrderBook,1>& orderBooks,
 	dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> >& processedQueue,
-	std::pmr::vector<uint64_t>& durations,
+	std::pmr::vector<std::pair<uint64_t, uint64_t>>& durations,
 	int marketFd
 	)
 {
@@ -213,12 +221,13 @@ int startMatch(int marketFd)
 	for (size_t i = 0; i < arrSize; i++)
 	{
 		size_t start{0};
+		size_t filledIdx{0};
 		_mm_lfence();
 		start = __rdtsc();
 
 		uint32_t aux{0};
 		std::visit(
-			overloaded{[&orderBooks, &processedQueue](NewOrderRequest& ordMsg) -> void
+			overloaded{[&orderBooks, &processedQueue, &filledIdx](NewOrderRequest& ordMsg) -> void
 			           {
 				           if (ordMsg.order.quantityLots == 0) [[unlikely]]
 				           {
@@ -228,7 +237,7 @@ int startMatch(int marketFd)
 					           return;
 				           }
 				           auto& symbol = orderBooks[static_cast<size_t>(ordMsg.instrumentId)];
-
+							auto writeIdxAtStart = symbol.filledWriteIdx;
 				           // TODO: use look-up table for functions instead of branching - we expect >75% mispredict
 
 				           MessageResponse response{};
@@ -255,6 +264,8 @@ int startMatch(int marketFd)
 				           }
 
 				           (void)processedQueue.try_emplace(std::move(response));
+							filledIdx = symbol.filledWriteIdx - writeIdxAtStart;
+
 			           },
 			           [&orderBooks, &processedQueue](CancelOrderRequest& cancelMsg) -> void
 			           {
@@ -266,7 +277,7 @@ int startMatch(int marketFd)
 
 			const auto end = __rdtscp(&aux);
 			_mm_lfence();
-			durations[i] = (end - start);
+			durations[i] = {(end - start), filledIdx};
 	}
 	g_done.store(true, std::memory_order::relaxed);
 
@@ -312,6 +323,7 @@ int startMatch(int marketFd)
 		}
 
 		OrderNode* resting = intrusiveList::head(currTickOrders.listSentinel);
+		__builtin_prefetch(resting->next); // get the next one ready
 		newLots += resting->order.quantityLots; // fill towards zero
 
 		// remainder is left in the resting if we crossed over the 0 in the dir we are going.
@@ -331,8 +343,7 @@ int startMatch(int marketFd)
 		if (!remainderLeftInResting)
 		{
 			intrusiveList::unlink(resting);
-			symbol.idToOrder.erase(resting->order.id);
-			symbol.ordersData.ReleaseToFree(resting);
+			symbol.ordersData.ReleaseToFree(resting, GetPriceLevelForOrder(resting, &symbol.ordersData.ordersData[0]));
 		}
 	}
 	// if no more orders left, set bestIdx to SIZE_MAX
@@ -396,7 +407,7 @@ int startMatch(int marketFd)
 	// TODO NOTE: assumes orders is not a ringbuffer. if ringbuffer, need to search for the level with that price ticks.
 	auto& currOrdersLevel = symbol.orders[ordMsg.priceTicksLimit];
 
-	OrderNode* incOrder = symbol.ordersData.GetFree();
+	OrderNode* incOrder = symbol.ordersData.GetFree(ordMsg.priceTicksLimit);
 	intrusiveList::append(currOrdersLevel.listSentinel, incOrder);
 
 	incOrder->order = newOrder;
@@ -417,13 +428,13 @@ int startMatch(int marketFd)
 MessageResponse HandleCancellation(const CancelOrderRequest& cancelMsg, OrderBook& symbol)
 {
 	g_cancels++;
-	if (auto extracted = symbol.idToOrder.extract(cancelMsg.toCancel); !extracted.empty())
+	if (auto* extractedOrd = symbol.idToOrder[cancelMsg.toCancel];
+		extractedOrd && extractedOrd->order.id == cancelMsg.toCancel)
 	{
-		OrderNode* extractedOrd = extracted.mapped();
 		Order order = std::move(extractedOrd->order);
 		symbol.counts[order.quantityLots > 0]--;
 		intrusiveList::unlink(extractedOrd);
-		symbol.ordersData.ReleaseToFree(extractedOrd);
+		symbol.ordersData.ReleaseToFree(extractedOrd, GetPriceLevelForOrder(extractedOrd, &symbol.ordersData.ordersData[0]));
 		return MessageResponse{order, MessageResponse::Result::Cancelled};
 	}
 	g_cancelsNotFound++;
@@ -470,29 +481,36 @@ void intrusiveList::unlink(OrderNode* n)
 }
 
 OrdersData::OrdersData(std::pmr::monotonic_buffer_resource& allocator) :
-	ordersData(allocator)
+	ordersData(allocator),
+	free_lists(allocator)
 {
-	free_list = &ordersData[0];
-	OrderNode* tail = free_list;
-	for (int64_t i = 1; i < ordersData.size(); i++)
+	for (int plevel = 0; plevel < free_lists.size(); plevel++)
 	{
-		tail->next = &ordersData[i];
-		tail = tail->next;
+		OrderNode* tail = &ordersData[0 + plevel * kOrdersPerTick];
+		free_lists[plevel] = tail;
+
+		for (int64_t ordIdx = 1; ordIdx < kOrdersPerTick; ordIdx++)
+		{
+			tail->next = &ordersData[ordIdx + plevel * kOrdersPerTick];
+			tail = tail->next;
+		}
 	}
 }
 
-OrderNode* OrdersData::GetFree()
+OrderNode* OrdersData::GetFree(size_t level)
 {
-	assert(free_list); // check if we have ran out of memory.
-	auto ret = std::exchange(free_list, free_list->next);
+	assert(free_lists[level]); // check if we have ran out of memory.
+	auto ret = std::exchange(free_lists[level], free_lists[level]->next);
 	ret->next = nullptr;
 	return ret;
 }
 
-void OrdersData::ReleaseToFree(OrderNode* freed)
+void OrdersData::ReleaseToFree(OrderNode* freed, size_t level)
 {
-	auto temp = free_list;
-	free_list = freed;
-	free_list->next = temp;
+	freed->order.id = 0;
+	freed->order.quantityLots = 0;
+	auto temp = free_lists[level];
+	free_lists[level] = freed;
+	free_lists[level]->next = temp;
 }
 }

@@ -88,6 +88,7 @@ struct MessageResponse
 	} result;
 };
 
+constexpr size_t arrSize = 15'000'000;
 
 constexpr size_t kPriceLevelCount = 128; // MUST be power of 2
 constexpr size_t kFulfilledOrdersCount = 2048; // MUST be power of 2
@@ -101,10 +102,11 @@ static_assert(std::has_single_bit(kOrdersPerTick));
 // exact calc would be useful when design and struct types are frozen so I can calculate using sizes and alignments
 constexpr size_t totalOrderCount = kPriceLevelCount * kOrdersPerTick;
 constexpr size_t sizeofOrderLevels = kPriceLevelCount * sizeof(OrdersForTick);
-constexpr size_t sizeofOrderNodes = 4 * totalOrderCount * sizeof(OrderNode);
+constexpr size_t sizeofOrderNodes = totalOrderCount * sizeof(OrderNode);
 constexpr size_t sizeofFulfilled = kFulfilledOrdersCount * sizeof(MessageResponse);
+constexpr size_t sizeofCancelMap = (arrSize+1) * sizeof(OrderNode*);
 
-constexpr size_t orderBookArenaSize = sizeofOrderLevels + sizeofOrderNodes + sizeofFulfilled + /*// slack for misalignment*/ sizeofFulfilled + totalOrderCount * 128;
+constexpr size_t orderBookArenaSize = sizeofOrderLevels + sizeofOrderNodes + sizeofFulfilled + /*// slack for misalignment*/ sizeofFulfilled + totalOrderCount * 128 + sizeofCancelMap;
 constexpr size_t processQueueSize = sizeof(MessageResponse) * totalOrderCount;
 
 enum class Instrument : std::size_t
@@ -155,11 +157,6 @@ struct CancelOrderRequest
 using NewRequest = std::variant<NewOrderRequest, CancelOrderRequest>;
 
 constexpr size_t hugepagesize = 2ull * 1024ull * 1024ull;
-constexpr size_t count = 10'000'000;
-// exactly arrSize requests are written, densely, with no gaps: both the
-// generator and the matcher size themselves off this one constant, so no
-// end-of-stream sentinel is needed.
-constexpr size_t arrSize = (count * 3ull) / 2ull;
 constexpr size_t arrSizeBytes = arrSize * sizeof(NewRequest);
 // hugetlbfs ftruncate rejects any length that is not a multiple of the huge
 // page size, so round up. mmap does not care and may use arrSizeBytes directly.
@@ -169,10 +166,10 @@ struct OrdersData
 {
 	OrdersData(std::pmr::monotonic_buffer_resource& allocator);
 	pc::pmr_array<OrderNode, totalOrderCount> ordersData;
-	OrderNode* GetFree();
-	void ReleaseToFree(OrderNode *freed);
+	OrderNode* GetFree(size_t level);
+	void ReleaseToFree(OrderNode *freed, size_t level);
 private:
-	OrderNode* free_list{};
+	pc::pmr_array<OrderNode*, kPriceLevelCount> free_lists;
 
 
 };
@@ -199,9 +196,11 @@ public:
 
 	OrdersData ordersData;
 
-	// cancellation helper, pretty shit as is since it does not recycle memory, but it'll do
-	// TODO: test open-addressed map and also directly pmr_array
-	std::pmr::unordered_map<size_t, OrderNode*> idToOrder;
+
+	// TODO: this was std::unordered_map, pretty bad because basically all of the nodes are cold when we come to them
+	// TODO: test proper open-addressed map with different allocation strategies
+	// cheating a bit here since we preallocate the whole range of ids, this should be a map but it's a todo
+	pc::pmr_array<OrderNode*, arrSize+1> idToOrder;
 
 	explicit OrderBook();
 	OrderBook(const OrderBook&) = delete;
@@ -218,6 +217,6 @@ int startMatch(int marketFd);
 [[clang::xray_always_instrument]] MessageResponse HandleLimitOrder(const NewOrderRequest&ordMsg, OrderBook &symbol);
 [[clang::xray_always_instrument]] MessageResponse HandleMarketOrder(const NewOrderRequest&ordMsg, OrderBook &symbol, size_t limit);
 [[clang::xray_always_instrument]] MessageResponse HandleCancellation(const CancelOrderRequest&cancelMsg, OrderBook &symbol);
-[[gnu::noinline]] void matchAllOrders(std::array<OrderBook, 1>& orderBooks, dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> >& processedQueue, std::pmr::vector<uint64_t>& durations, int marketFd);
+[[gnu::noinline]] void matchAllOrders(std::array<OrderBook, 1>& orderBooks, dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> >& processedQueue, std::pmr::vector<std::pair<uint64_t, uint64_t>>& durations, int marketFd);
 
 }
