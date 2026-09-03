@@ -30,17 +30,52 @@
 
 using namespace matcher;
 
-
-
-int main()
+namespace
 {
-	std::mt19937 gen(75); // same seed as matcher.cpp, so the stream is comparable
 
-	// MFD_HUGETLB puts the file in hugetlbfs, drawing from the vm.nr_hugepages
-	// pool rather than from transparent hugepages. Reservation happens at mmap
-	// time, so an undersized pool fails loudly instead of SIGBUS-ing later.
-	// MFD_CLOEXEC only affects exec(), which we never call; it costs nothing and
-	// keeps the descriptor from leaking if that ever changes.
+std::bernoulli_distribution isBuyDistrib(0.5);
+
+std::geometric_distribution<int> depthDistrib(0.5); // 0 half the time, 1 1/4 of the time...
+std::bernoulli_distribution crossingOrderDistrib(0.03); // 3%
+std::uniform_int_distribution<int> driftStepDistrib(-1, 1); // move spread
+std::geometric_distribution<size_t> cancelAgeDistrib(0.05);
+
+std::discrete_distribution<size_t> lotsDistrib({30, 25, 20, 10,  7,  5,  2,   1});
+constexpr std::array<int64_t, 8>   lotSizes       { 1,  2,  5, 10, 20, 50, 80, 100};
+
+
+size_t mid = 64;
+
+size_t makePrice(bool isBuy, bool crossing, std::mt19937& gen)
+{
+
+	// distance from midpoint, geometric
+	const int depth = depthDistrib(gen);
+
+	// passive bid and crossing asks are below the mid: mid - 1 - d;
+	// passive ask and crossing bids are above the mid: mid + 1 + d;
+
+	const bool aboveMid = isBuy == crossing;
+	const int price = aboveMid ? mid + 1 + depth : mid - 1 - depth;
+
+	return static_cast<size_t>(std::clamp<int64_t>(price, 0, kPriceLevelCount - 1));
+}
+
+void driftMidpoint(std::mt19937& gen)
+{
+	mid += driftStepDistrib(gen);
+	// revert towards mean if we start going off the wall
+	if (mid > 90) { mid -= 1; };
+	if (mid < 37) { mid += 1; };
+}
+}
+
+
+int main(int argc, char* argv[])
+{
+	int seed = std::stoi(std::string(argv[1]));
+	std::mt19937 gen(seed);
+
 	int fd = memfd_create("market", MFD_HUGETLB | MFD_CLOEXEC);
 	if (fd == -1)
 	{
@@ -55,69 +90,144 @@ int main()
 		return 1;
 	}
 
-	// MAP_HUGETLB is not repeated here: the hugeness comes from the file being in
-	// hugetlbfs. MAP_POPULATE prefaults every page now, so the consumer's timed
-	// loop never pays a fault. The returned address is guaranteed huge-page
-	// aligned, since a huge page is mapped by a single PMD entry.
 	void* region = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, 0);
 	if (region == MAP_FAILED)
 	{
 		std::perror("mmap"); // ENOMEM here means the hugepage pool is too small
 		return 1;
 	}
-	NewRequest* orders = static_cast<NewRequest*>(region);
+	NewRequest* orders_p = static_cast<NewRequest*>(region);
 
 	std::println("attach with: ./exchange /proc/{}/fd/{}   ({} requests, {} bytes)", getpid(), fd, arrSize, allocSize);
-	(void)std::fflush(stdout); // the reader is a human in another terminal; do not sit in the buffer
 
+
+	enum Action : int { AddLimit = 0, Cancel = 1, Market = 2 };
+	// 50% limits, 44% cancels, 6% markets
+	std::discrete_distribution<int> action({50, 44, 6});
 	size_t msgId = 1;
 
-	std::uniform_int_distribution<int64_t> distribLots(500, 20000);
-	std::uniform_int_distribution<size_t> distribTicks(40, 60);
-	std::uniform_int_distribution<int32_t> distribType(0, 3);
-	std::uniform_int_distribution<int32_t> cancelDistrib(0, 1);
+	// what was emitted
+	size_t limitBids = 0, limitAsks = 0, crossingLimits = 0;
+	size_t marketBuys = 0, marketSells = 0;
+	size_t cancels = 0, cancelsForcedToLimit = 0;
+	int64_t limitLotsTotal = 0, marketLotsTotal = 0;
 
-	size_t orderCount = 0;
+	// the generator's own picture of what rests: [side][price] -> order count,
+	// side 0 = ask, 1 = bid (same layout as OrderBook::counts). fills are not
+	// modelled here, so this is an upper bound on what the exchange really holds.
+	std::array<std::array<size_t, kPriceLevelCount>, 2> restingModel{};
+
+	struct LiveOrder
+	{
+		OrderID id;
+		size_t price;
+		bool isBuy;
+	};
+	std::vector<LiveOrder> live{};
+	size_t maxLive = 0;
 
 	for (size_t i = 0ul; i < arrSize; ++i)
 	{
-		int8_t ordTypeNum = static_cast<int8_t>(distribType(gen));
-		OrderType ordType = static_cast<OrderType>(ordTypeNum);
-
-		int64_t sign = (ordTypeNum < 2) ? 1 : -1; // -1 if selling
-		int64_t lots = distribLots(gen) * sign;
-
-		size_t ticks = distribTicks(gen);
-		size_t ordIsLimit = (ordType == OrderType::BuyLimit || ordType == OrderType::SellLimit);
-		size_t orderId = msgId++;
-
-		// Construct the *variant*, not the alternative. Placement-newing a bare
-		// NewOrderRequest here would leave the discriminant at whatever the page
-		// held (zero), so every cancel would silently read back as an order.
-		new (orders + i) NewRequest{NewOrderRequest{.msgId = orderId,
-			.order = {.id = orderId, .quantityLots = lots},
-			.orderType = ordType,
-			.instrumentId = Instrument::Time,
-			.priceTicksLimit = ordIsLimit * ticks}};
-		++orderCount;
-
-		if (static_cast<bool>(cancelDistrib(gen)))
+		static constexpr int driftN = 500;
+		if (i % driftN == 0)
 		{
-			// a cancel drawn on the final slot is dropped, so the array stays
-			// exactly arrSize long with no gaps and needs no sentinel.
-			if (++i < arrSize)
-			{
-				new (orders + i) NewRequest{CancelOrderRequest{
-					.msgId = msgId++, .toCancel = orderId, .instrumentId = Instrument::Time}};
-			}
+			driftMidpoint(gen);
+		}
+
+		Action act = static_cast<Action>(action(gen));
+
+		if (act == Cancel && live.empty())
+		{
+			act = AddLimit;
+			++cancelsForcedToLimit;
+		}
+
+		if (act == Cancel)
+		{
+			const size_t k = std::min(live.size() - 1, cancelAgeDistrib(gen));
+			const size_t idx = live.size() - 1 - k;
+			const LiveOrder victim = live[idx];
+			new (orders_p + i) NewRequest{CancelOrderRequest{
+				.msgId = msgId++, .toCancel = victim.id, .instrumentId = Instrument::Time}};
+			live[idx] = live.back(); //swap with back
+			live.pop_back();
+			--restingModel[victim.isBuy][victim.price];
+			++cancels;
+			continue;
+		}
+
+		const bool isBuy = isBuyDistrib(gen);
+		const bool isLimit = act == AddLimit;
+		const int64_t sign = isBuy ? 1 : -1; // -1 if selling
+
+		const int64_t lots = lotSizes[lotsDistrib(gen)];
+
+		const size_t orderId = msgId++;
+		OrderType type = isBuy ? (isLimit ? OrderType::BuyLimit : OrderType::Buy) :
+								(isLimit ? OrderType::SellLimit : OrderType::Sell);
+
+		const bool crossing = isLimit && crossingOrderDistrib(gen);
+		const size_t price = isLimit ? makePrice(isBuy, crossing, gen) : 0;
+
+		new (orders_p + i) NewRequest{NewOrderRequest{.msgId = orderId,
+			.order = {
+				.id = orderId,
+				.quantityLots = sign * lots
+			},
+			.orderType = type,
+			.instrumentId = Instrument::Time,
+			.priceTicksLimit = price}};
+
+		if (isLimit)
+		{
+			live.push_back({orderId, price, isBuy});
+			maxLive = std::max(maxLive, live.size());
+			++restingModel[isBuy][price];
+			(isBuy ? limitBids : limitAsks)++;
+			crossingLimits += crossing;
+			limitLotsTotal += lots;
+		}
+		else
+		{
+			(isBuy ? marketBuys : marketSells)++;
+			marketLotsTotal += lots;
 		}
 	}
 
-	std::println("generated {} requests: {} orders, {} cancels", arrSize, orderCount, arrSize - orderCount);
+	const size_t limits = limitBids + limitAsks;
+	const size_t markets = marketBuys + marketSells;
+	std::println("generated {} requests:", arrSize);
+	std::println("  limits:  {} ({:.1f}%)  bids {}  asks {}  crossing {}  avg lots {:.1f}",
+		limits, 100.0 * limits / arrSize, limitBids, limitAsks, crossingLimits,
+		static_cast<double>(limitLotsTotal) / limits);
+	std::println("  markets: {} ({:.1f}%)  buys {}  sells {}  avg lots {:.1f}",
+		markets, 100.0 * markets / arrSize, marketBuys, marketSells,
+		static_cast<double>(marketLotsTotal) / markets);
+	std::println("  cancels: {} ({:.1f}%)  {} cancel draws turned into limits because the pool was empty",
+		cancels, 100.0 * cancels / arrSize, cancelsForcedToLimit);
+
+	// ladder as the generator sees it: bids on the left, asks on the right, high price first.
+	size_t modelBids = 0, modelAsks = 0;
+	for (size_t p = 0; p < kPriceLevelCount; ++p)
+	{
+		modelBids += restingModel[1][p];
+		modelAsks += restingModel[0][p];
+	}
+	std::println("generator's book at the end (fills not modelled): mid {}  live pool {} (peak {})  bids {}  asks {}",
+		mid, live.size(), maxLive, modelBids, modelAsks);
+	std::println("  {:>6} {:>5} {:>6}", "bids", "price", "asks");
+	for (size_t p = kPriceLevelCount; p-- > 0;)
+	{
+		const size_t bids = restingModel[1][p];
+		const size_t asks = restingModel[0][p];
+		if (bids == 0 && asks == 0)
+		{
+			continue;
+		}
+		std::println("  {:>6} {:>5} {:>6}{}", bids, p, asks, p == mid ? "  <- mid" : "");
+	}
 	(void)std::fflush(stdout);
 
-	// The memfd dies with its last reference, and /proc/<pid>/fd/<fd> only exists
-	// while this descriptor is open, so block here rather than exiting.
 	::pause();
 
 	return 0;

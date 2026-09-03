@@ -17,14 +17,13 @@
 namespace
 {
 size_t g_limitOrders = 0;
+size_t g_noOps = 0;
 size_t g_marketOrders = 0;
 size_t g_cancels = 0;
+size_t g_cancelsNotFound = 0;
 size_t g_crossOrder = 0;
 size_t g_restingOrder = 0;
 size_t g_fullyFilledCrossOrder = 0;
-size_t g_generatedMarkets = 0;
-size_t g_generatedBids = 0;
-size_t g_generatedLimits = 0;
 
 // helper type for the visitor #4
 template <class... Ts>
@@ -37,6 +36,7 @@ struct overloaded : Ts...
 namespace matcher
 {
 
+constexpr size_t generatedOrders = 10'000'000ul;
 OrderBook::OrderBook() :
 	arenaAlloc(orderBookArenaSize),
 	arena(arenaAlloc.data(), arenaAlloc.size(), std::pmr::null_memory_resource()),
@@ -45,11 +45,10 @@ OrderBook::OrderBook() :
 	ordersData{arena},
 	idToOrder{std::pmr::polymorphic_allocator<std::pair<size_t, OrderNode*>>(&arena)}
 {
-	idToOrder.reserve(totalOrderCount / 2);
+	idToOrder.reserve(generatedOrders * 0.7);
 }
 
 
-constexpr size_t generatedOrders = 10'000'000ul;
 
 std::atomic<bool> g_done = false;
 
@@ -139,13 +138,15 @@ int startMatch(int marketFd)
 	size_t idx95 = static_cast<size_t>(0.95 * durations.size());
 	size_t idx50 = static_cast<size_t>(0.5 * durations.size());
 
-	//rdtsc - 58 cycles
-	std::println("p99.999, idx {}: {:.0f}ns", idx99999, ((durations[idx99999] - 58) / 2.8945));
-	std::println("p99.99, idx {}: {:.0f}ns", idx9999, ((durations[idx9999] - 58) / 2.8945));
-	std::println("p99.9, idx {}: {:.0f}ns", idx999, ((durations[idx999] - 58) / 2.8945));
-	std::println("p99, idx {}: {:.0f}ns", idx99, ((durations[idx99] - 58) / 2.8945));
-	std::println("p95, idx {}: {:.0f}ns", idx95, ((durations[idx95] - 58) / 2.8945));
-	std::println("p50, idx {}: {:.0f}ns", idx50, ((durations[idx50] - 58) / 2.8945));
+	// rdtsc
+	constexpr int cyclesForRdtsc = 58;
+	constexpr double cyclesPerNs = 2.8945;
+	std::println("p99.999, idx {}: {:.0f}ns", idx99999, ((durations[idx99999] - cyclesForRdtsc) / cyclesPerNs));
+	std::println("p99.99, idx {}: {:.0f}ns", idx9999, ((durations[idx9999] - cyclesForRdtsc) / cyclesPerNs));
+	std::println("p99.9, idx {}: {:.0f}ns", idx999, ((durations[idx999] - cyclesForRdtsc) / cyclesPerNs));
+	std::println("p99, idx {}: {:.0f}ns", idx99, ((durations[idx99] - cyclesForRdtsc) / cyclesPerNs));
+	std::println("p95, idx {}: {:.0f}ns", idx95, ((durations[idx95] - cyclesForRdtsc) / cyclesPerNs));
+	std::println("p50, idx {}: {:.0f}ns", idx50, ((durations[idx50] - cyclesForRdtsc) / cyclesPerNs));
 	std::println("last: {:.0f}ns", ((durations.back() - 58) / 2.8945));
 
 	std::println("executed_limits: {}, resting_crosses: {}, fully_filled_crosses: {}, resting: {}",
@@ -153,16 +154,37 @@ int startMatch(int marketFd)
 		g_crossOrder - g_fullyFilledCrossOrder,
 		g_fullyFilledCrossOrder,
 		g_restingOrder);
+	std::println("no ops (aggressive order found the opposite side empty): {}", g_noOps);
 	std::println("executed_markets: {}", g_marketOrders - g_crossOrder);
-	std::println("executed_cancels: {}", g_cancels);
-	std::println("generated_markets: {}, generated_limits: {}, generated_bids: {}, generated_asks: {}",
-		g_generatedMarkets,
-		g_generatedLimits,
-		g_generatedBids,
-		g_generatedLimits + g_generatedMarkets - g_generatedBids);
+	std::println("executed_cancels: {}, of which not found (already filled): {}", g_cancels, g_cancelsNotFound);
 	std::println("book state: ask: {}, bid: {}",
-		orderBooks[static_cast<size_t>(Instrument::Time)].bestIdx[0],
-		orderBooks[static_cast<size_t>(Instrument::Time)].bestIdx[1]);
+		orderBooks[0].bestIdx[0],
+		orderBooks[0].bestIdx[1]);
+	std::println("book width: asks: {}, bids: {}", orderBooks[0].counts[0], orderBooks[0].counts[1]);
+
+	// the real ladder: walk every level's intrusive list. a level holds one side
+	// only, and the sign of quantityLots says which. high price first.
+	std::println("book ladder (non-empty levels):");
+	std::println("  {:>6} {:>8} {:>5} {:>6} {:>8}", "bids", "bidLots", "price", "asks", "askLots");
+	const OrderBook& book = orderBooks[0];
+	for (size_t p = kPriceLevelCount; p-- > 0;)
+	{
+		size_t bids = 0, asks = 0;
+		int64_t bidLots = 0, askLots = 0;
+		const OrderNode& sentinel = book.orders[p].listSentinel;
+		for (const OrderNode* n = sentinel.next; n != &sentinel; n = n->next)
+		{
+			const bool isBid = n->order.quantityLots > 0;
+			(isBid ? bids : asks)++;
+			(isBid ? bidLots : askLots) += n->order.quantityLots;
+		}
+		if (bids == 0 && asks == 0)
+		{
+			continue;
+		}
+		const char* mark = p == book.bestIdx[1] ? "  <- best bid" : p == book.bestIdx[0] ? "  <- best ask" : "";
+		std::println("  {:>6} {:>8} {:>5} {:>6} {:>8}{}", bids, bidLots, p, asks, -askLots, mark);
+	}
 	//	std::println("instructions  : {}", instructions.read());
 	//	std::println("branches      : {}", branches.read());
 	//	std::println("branch misses : {}", branchMisses.read());
@@ -265,6 +287,8 @@ int startMatch(int marketFd)
 	int direction = orderIsBuy * 2 - 1;
 
 	auto& orderCount = symbol.counts[!orderIsBuy];
+	g_noOps += orderCount == 0;
+
 	// quantityLots is positive if the order is a buy.
 	// in that case, direction is 1 -> if we go under 0, it means  we are overfilled: end
 	// quantityLots is negative if the order is a sell.
@@ -402,6 +426,7 @@ MessageResponse HandleCancellation(const CancelOrderRequest& cancelMsg, OrderBoo
 		symbol.ordersData.ReleaseToFree(extractedOrd);
 		return MessageResponse{order, MessageResponse::Result::Cancelled};
 	}
+	g_cancelsNotFound++;
 	return {.oOrder = std::nullopt, .result = MessageResponse::Result::NotFound};
 }
 

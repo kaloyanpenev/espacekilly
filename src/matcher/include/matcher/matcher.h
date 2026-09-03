@@ -97,9 +97,11 @@ static_assert(std::has_single_bit(kFulfilledOrdersCount));
 static_assert(std::has_single_bit(kOrdersPerTick));
 
 // sizeof the ordersForTick struct + sizeof the orders array
+// note these are all ballpark and also hardcoded to whatever I'm testing with rn. They are not calculated exactly -
+// exact calc would be useful when design and struct types are frozen so I can calculate using sizes and alignments
 constexpr size_t totalOrderCount = kPriceLevelCount * kOrdersPerTick;
 constexpr size_t sizeofOrderLevels = kPriceLevelCount * sizeof(OrdersForTick);
-constexpr size_t sizeofOrderNodes = totalOrderCount * sizeof(OrderNode);
+constexpr size_t sizeofOrderNodes = 4 * totalOrderCount * sizeof(OrderNode);
 constexpr size_t sizeofFulfilled = kFulfilledOrdersCount * sizeof(MessageResponse);
 
 constexpr size_t orderBookArenaSize = sizeofOrderLevels + sizeofOrderNodes + sizeofFulfilled + /*// slack for misalignment*/ sizeofFulfilled + totalOrderCount * 128;
@@ -197,7 +199,8 @@ public:
 
 	OrdersData ordersData;
 
-	// cancellation helper
+	// cancellation helper, pretty shit as is since it does not recycle memory, but it'll do
+	// TODO: test open-addressed map and also directly pmr_array
 	std::pmr::unordered_map<size_t, OrderNode*> idToOrder;
 
 	explicit OrderBook();
