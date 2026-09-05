@@ -36,8 +36,8 @@ else()
   # GCC/Clang optimization flags
   set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g" CACHE STRING "Debug compiler flags" FORCE)
   set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g" CACHE STRING "RelWithDebInfo compiler flags" FORCE)
-  set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "Release compiler flags" FORCE)
-  set(CMAKE_CXX_FLAGS_RELEASEO3 "-O3 -DNDEBUG" CACHE STRING "ReleaseO3 compiler flags" FORCE)
+  set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG -march=native -ffast-math -flto" CACHE STRING "Release compiler flags" FORCE)
+  set(CMAKE_CXX_FLAGS_RELEASEO3 "-O3 -DNDEBUG -march=native -ffast-math -flto" CACHE STRING "ReleaseO3 compiler flags" FORCE)
 endif()
 
 # Boost (header-only components, e.g. boost::unordered_flat_map)

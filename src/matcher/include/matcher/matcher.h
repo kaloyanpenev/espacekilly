@@ -5,6 +5,7 @@
 #include "hugepage_allocation.h"
 #include "ring_buffer.h"
 
+#include <bit>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -88,7 +89,7 @@ struct MessageResponse
 	} result;
 };
 
-constexpr size_t arrSize = 15'000'000;
+constexpr size_t arrSize = 20'000'000;
 
 constexpr size_t kPriceLevelCount = 128; // MUST be power of 2
 constexpr size_t kFulfilledOrdersCount = 2048; // MUST be power of 2
@@ -210,13 +211,39 @@ public:
 };
 
 
-//int startMatch(std::shared_ptr<dro::SPSCQueue<NewOrderRequest>> messageQueue);
+// for profiling
+struct Duration
+{
+	uint64_t time;   // rdtsc cycles, convert with nsPerCycle below
+	uint32_t fills;
+	uint32_t id; // orderID is size_t but for now it's fine as we are not going over 15mil TODO fix
+
+	auto operator<=>(const Duration&) const = default;
+};
+
+// reciprocal throughput of rdtsc is 37 on zen2, so this can't possibly measure the loop with the necessary fidelity.
+// hence we only measure the tail where latencies are at least twice this
+constexpr int cyclesForRdtsc = 1; // let's say latency is 1... couldn't find latency number for zen2
+constexpr double nsPerCycle = 0.345; // 2.9ghz
+
+// Duration::time in nanoseconds, the one conversion every reader of a Duration needs.
+constexpr int DurationNs(const Duration& d)
+{
+	return static_cast<int>((static_cast<double>(d.time) - cyclesForRdtsc) * nsPerCycle + 0.5);
+}
+
 // marketFd: a read-only descriptor for market_generator's memfd, obtained by
 // opening the /proc/<pid>/fd/<fd> path it prints. Ownership stays with the caller.
 int startMatch(int marketFd);
 [[clang::xray_always_instrument]] MessageResponse HandleLimitOrder(const NewOrderRequest&ordMsg, OrderBook &symbol);
 [[clang::xray_always_instrument]] MessageResponse HandleMarketOrder(const NewOrderRequest&ordMsg, OrderBook &symbol, size_t limit);
 [[clang::xray_always_instrument]] MessageResponse HandleCancellation(const CancelOrderRequest&cancelMsg, OrderBook &symbol);
-[[gnu::noinline]] void matchAllOrders(std::array<OrderBook, 1>& orderBooks, dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> >& processedQueue, std::pmr::vector<std::pair<uint64_t, uint64_t>>& durations, int marketFd);
+[[gnu::noinline]] void matchAllOrders(
+	std::array<OrderBook, 1>& orderBooks,
+	dro::SPSCQueue<MessageResponse,
+	0,
+	std::pmr::polymorphic_allocator<MessageResponse> >& processedQueue,
+	std::pmr::vector<Duration>& durations,
+	int marketFd);
 
 }

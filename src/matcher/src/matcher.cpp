@@ -1,8 +1,11 @@
 #include <matcher/matcher.h>
 
 #include "perfController.h"
+#include "plots/plots.h"
 #include <algorithm>
+#include <cmath>
 #include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <list>
 #include <memory_resource>
@@ -10,8 +13,10 @@
 #include <ranges>
 #include <sys/mman.h>
 #include <thread>
+#include <span>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 #include <x86intrin.h>
 
 namespace
@@ -37,6 +42,39 @@ constexpr size_t kOrdersPerTickShift = std::countr_zero(matcher::kOrdersPerTick)
 size_t GetPriceLevelForOrder(const matcher::OrderNode* node, const matcher::OrderNode* startNode)
 {
 	return (node - startNode) >> kOrdersPerTickShift;
+}
+
+enum class PlotScale : uint8_t
+{
+	Log,
+	Linear
+};
+
+void WriteHistogram(double startPercentile, double endPercentile, std::string_view filename, const std::pmr::vector<matcher::Duration>& durations, PlotScale scale)
+{
+	const size_t first = static_cast<size_t>(startPercentile * durations.size());
+	const size_t last = static_cast<size_t>(endPercentile * durations.size());
+	const std::span<const matcher::Duration> slice(durations.data() + first, last - first);
+
+	auto file = std::ofstream(filename.data(), std::ios::trunc);
+	if (file.is_open())
+	{
+		for (const matcher::Duration& dur : slice)
+			file << dur.id << " " << matcher::DurationNs(dur) << " " << dur.fills << std::endl;
+	}
+
+	const std::filesystem::path latency = std::filesystem::path(std::string(filename).append(".svg"));
+	switch (scale)
+	{
+	case PlotScale::Log:    plots::WriteLatencyHistogramLog(slice, latency); break;
+	case PlotScale::Linear: plots::WriteLatencyHistogramLinear(slice, latency); break;
+	}
+	const std::filesystem::path latency_by_id = std::filesystem::path(std::string(filename).append("_by_id.svg"));
+	const std::filesystem::path latency_by_fills = std::filesystem::path(std::string(filename).append("_by_fills.svg"));
+
+	plots::WriteLatencyByOrderId(slice, latency_by_id);
+	plots::WriteLatencyByFills(slice, latency_by_fills);
+	std::println("plots written at: \n{} \n{} \n{}", latency.generic_string(), latency_by_id.generic_string(), latency_by_fills.generic_string());
 }
 
 }
@@ -106,7 +144,7 @@ int startMatch(int marketFd)
 
 	std::array<OrderBook, static_cast<size_t>(Instrument::Count)> orderBooks{OrderBook{}};
 
-	std::pmr::vector<std::pair<uint64_t, uint64_t>> durations(arrSize, {0,0}, std::pmr::polymorphic_allocator<std::pair<uint64_t, uint64_t>>(&dursAllocBuf));
+	std::pmr::vector<Duration> durations(arrSize, {0,0}, std::pmr::polymorphic_allocator<Duration>(&dursAllocBuf));
 
 
 	matchAllOrders(orderBooks, responses, durations, marketFd);
@@ -123,21 +161,9 @@ int startMatch(int marketFd)
 
 	std::ranges::sort(durations);
 
-	//	static constexpr std::string_view path = "durations.yaml";
-	//
-	//	auto file = std::ofstream(path.data(), std::ios::trunc);
-	//	if (file.is_open())
-	//	{
-	//		for (const auto& dur : durations)
-	//		{
-	////			std::string count = std::to_string(dur.count());
-	////			file.write(count.data(), count.size());
-	////			file.write("\n", 1);
-	////			file.flush();
-	//			file << (dur / 3) << std::endl;
-	//
-	//		}
-	//	}
+	WriteHistogram(0.0, 1.0, "p0_to_p100", durations, PlotScale::Log);
+	WriteHistogram(0.95, 1.0, "p99_to_p100", durations, PlotScale::Log);
+	WriteHistogram(0.9999, 1.0, "p99_99_to_p100", durations, PlotScale::Linear);
 
 	size_t idx99999 = static_cast<size_t>(0.99999 * durations.size());
 	size_t idx9999 = static_cast<size_t>(0.9999 * durations.size());
@@ -146,16 +172,13 @@ int startMatch(int marketFd)
 	size_t idx95 = static_cast<size_t>(0.95 * durations.size());
 	size_t idx50 = static_cast<size_t>(0.5 * durations.size());
 
-	// rdtsc
-	constexpr int cyclesForRdtsc = 58;
-	constexpr double cyclesPerNs = 2.8945;
-	std::println("p99.999, idx {}: {:.0f}ns, fills/order: {}", idx99999, ((durations[idx99999].first - cyclesForRdtsc) / cyclesPerNs), durations[idx99999].second);
-	std::println("p99.99, idx {}: {:.0f}ns, fills/order: {}", idx9999, ((durations[idx9999].first - cyclesForRdtsc) / cyclesPerNs), durations[idx9999].second);
-	std::println("p99.9, idx {}: {:.0f}ns, fills/order: {}", idx999, ((durations[idx999].first - cyclesForRdtsc) / cyclesPerNs),durations[idx999].second);
-	std::println("p99, idx {}: {:.0f}ns, fills/order: {}", idx99, ((durations[idx99].first - cyclesForRdtsc) / cyclesPerNs), durations[idx99].second);
-	std::println("p95, idx {}: {:.0f}ns, fills/order: {}", idx95, ((durations[idx95].first - cyclesForRdtsc) / cyclesPerNs), durations[idx95].second);
-	std::println("p50, idx {}: {:.0f}ns, fills/order: {}", idx50, ((durations[idx50].first - cyclesForRdtsc) / cyclesPerNs), durations[idx50].second);
-	std::println("last: {:.0f}ns, fills/order: {}", ((durations.back().first - cyclesForRdtsc) / cyclesPerNs), durations.back().second);
+	std::println("p99.999, idx {}: {}ns, fills/order: {}", idx99999, matcher::DurationNs(durations[idx99999]), durations[idx99999].fills);
+	std::println("p99.99, idx {}: {}ns, fills/order: {}", idx9999,  matcher::DurationNs(durations[idx9999]), durations[idx9999].fills);
+	std::println("p99.9, idx {}: {}ns, fills/order: {}", idx999,  matcher::DurationNs(durations[idx999]),durations[idx999].fills);
+	std::println("p99, idx {}: {}ns, fills/order: {}", idx99,  matcher::DurationNs(durations[idx99]), durations[idx99].fills);
+	std::println("p95, idx {}: {}ns, fills/order: {}", idx95,  matcher::DurationNs(durations[idx95]), durations[idx95].fills);
+	std::println("p50, idx {}: {}ns, fills/order: {}", idx50,  matcher::DurationNs(durations[idx50]), durations[idx50].fills);
+	std::println("last: {}ns, fills/order: {}",  matcher::DurationNs(durations.back()), durations.back().fills);
 
 	std::println("executed_limits: {}, resting_crosses: {}, fully_filled_crosses: {}, resting: {}",
 		g_limitOrders,
@@ -204,7 +227,7 @@ int startMatch(int marketFd)
 
 [[clang::xray_always_instrument]] void matchAllOrders(std::array<OrderBook,1>& orderBooks,
 	dro::SPSCQueue<MessageResponse, 0, std::pmr::polymorphic_allocator<MessageResponse> >& processedQueue,
-	std::pmr::vector<std::pair<uint64_t, uint64_t>>& durations,
+	std::pmr::vector<Duration>& durations,
 	int marketFd
 	)
 {
@@ -221,13 +244,14 @@ int startMatch(int marketFd)
 	for (size_t i = 0; i < arrSize; i++)
 	{
 		size_t start{0};
-		size_t filledIdx{0};
+		uint32_t filledIdx{0};
+		OrderID orderId{0};
 		_mm_lfence();
 		start = __rdtsc();
 
 		uint32_t aux{0};
 		std::visit(
-			overloaded{[&orderBooks, &processedQueue, &filledIdx](NewOrderRequest& ordMsg) -> void
+			overloaded{[&orderBooks, &processedQueue, &filledIdx, &orderId](NewOrderRequest& ordMsg) -> void
 			           {
 				           if (ordMsg.order.quantityLots == 0) [[unlikely]]
 				           {
@@ -236,6 +260,7 @@ int startMatch(int marketFd)
 						                           .result = MessageResponse::Result::Rejected});
 					           return;
 				           }
+							orderId = ordMsg.order.id;
 				           auto& symbol = orderBooks[static_cast<size_t>(ordMsg.instrumentId)];
 							auto writeIdxAtStart = symbol.filledWriteIdx;
 				           // TODO: use look-up table for functions instead of branching - we expect >75% mispredict
@@ -267,7 +292,7 @@ int startMatch(int marketFd)
 							filledIdx = symbol.filledWriteIdx - writeIdxAtStart;
 
 			           },
-			           [&orderBooks, &processedQueue](CancelOrderRequest& cancelMsg) -> void
+			           [&orderBooks, &processedQueue, &orderId](CancelOrderRequest& cancelMsg) -> void
 			           {
 				           auto& symbol = orderBooks[static_cast<size_t>(cancelMsg.instrumentId)];
 				           MessageResponse result = HandleCancellation(cancelMsg, symbol);
@@ -276,8 +301,7 @@ int startMatch(int marketFd)
 			orders[i]);
 
 			const auto end = __rdtscp(&aux);
-			_mm_lfence();
-			durations[i] = {(end - start), filledIdx};
+			durations[i] = Duration{(end - start), filledIdx, static_cast<uint32_t>(orderId)};
 	}
 	g_done.store(true, std::memory_order::relaxed);
 
