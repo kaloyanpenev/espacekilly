@@ -81,9 +81,13 @@ From the _by_fills graph, We can see that with more filled orders, the mean late
 This leaves us with likely the main culprit - cache misses in deep-sweeping orders that match on cold cache entries. This is an issue of the intrusive linked list as fetching subsequent orders is dependent on each earlier one, so basically pointer chasing into DRAM... ouch! I would like to investigate ways to fix this by prefetching the head of adjacent tick levels periodically, or a different layout altogether for the levels so I can make more use of memory level parallelism (and also ILP as right now everything is data-bottlenecked). To do this properly, however, would mean that I first need to implement an actual data feed with proper real life constraints as right now everything is in a tight loop and using pretty hacky conditions. This is the main TODO but it is not trivial.
 
 
+## Note:
+
+Ignore the `udp_` projects, those are me doing some experiments.
+
 ### To run
 
-A bit janky as of right now, but first build and run `market_generator` - it creates the market in shared memory and gives you how to attach from the main exchange. Reason for this is because I wanted to do IPC for this.
+First build and run `market_generator` - it creates the market in shared memory and gives you how to attach from the main exchange. Reason for this is because I wanted to do IPC for this.
 
 ```
 $ ./market_generator <seed> 
